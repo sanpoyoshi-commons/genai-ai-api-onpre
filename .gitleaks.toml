@@ -1,0 +1,17 @@
+# gitleaks configuration for genai-ai-api-onpre
+# 設計原則: 共通 baseline + リポ別差分（差分は実機検証で段階追加）
+
+title = "genai-ai-api-onpre baseline"
+
+[extend]
+# gitleaks 標準ルールを拡張（OpenAI / AWS / GCP / Stripe / GitHub Token 等の主要パターン）
+useDefault = true
+
+[allowlist]
+description = "Allowlist for known non-secrets"
+paths = [
+    '''^node_modules/''',
+    '''^dist/''',
+    '''^\.git/''',
+    '''^\.gitleaks\.toml$''',
+]

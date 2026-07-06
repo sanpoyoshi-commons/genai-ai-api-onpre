@@ -1,0 +1,34 @@
+# pre-commit configuration for genai-ai-api-onpre
+# クールダウン整合: rev でバージョン固定 + 7日下限
+# secrets 検出は commit 時、重いセキュリティスキャナ（SAST/依存）は push 時に走る。
+# 有効化: pre-commit install（pre-commit と pre-push の両フックを入れる）。
+# pre-push のスキャナは uvx（semgrep）/ docker（osv-scanner）を使う。
+#   これらが未導入の環境では各フックは自動でスキップされる（push は止めない）。
+# SAST は本リポ実装の src/ のみを対象とする。
+# 手動一括: pre-commit run --hook-stage pre-push --all-files
+# 関連設定: .gitleaks.toml（gitleaks）
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1  # 2026-03-21 リリース、2026-05-22 確認時点で62日経過、クールダウン下限7日を大幅超過
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # SAST（TypeScript）。本リポ実装の src/ のみ。findings で push を止める。uvx 未導入ならスキップ。
+      - id: semgrep
+        name: semgrep (SAST)
+        entry: bash -c 'if command -v uvx >/dev/null 2>&1; then uvx semgrep scan --error --metrics off --config p/typescript --config p/javascript --config p/security-audit --config p/secrets src/; else echo "[pre-push] uvx 未導入のため semgrep をスキップ"; fi'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      # 依存の既知脆弱性。本リポの root package-lock.json のみを対象とする。docker 未導入ならスキップ。
+      - id: osv-scanner
+        name: osv-scanner (deps)
+        entry: bash -c 'if command -v docker >/dev/null 2>&1; then docker run --rm -v "$PWD":/src ghcr.io/google/osv-scanner:latest scan source -L /src/package-lock.json; else echo "[pre-push] docker 未導入のため osv-scanner をスキップ"; fi'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

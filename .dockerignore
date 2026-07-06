@@ -1,0 +1,25 @@
+# Build artifacts / deps
+node_modules
+dist
+
+# Prisma 生成クライアント（イメージ内で prisma generate して再生成する）
+src/generated
+
+# VCS / tooling
+.git
+.github
+
+# Tests (not needed in runtime image)
+tests
+
+# Docs / meta
+docs
+*.md
+LICENSE*
+NOTICE
+UPSTREAM.md
+
+# Local env
+.env
+.env.*
+!.env.example

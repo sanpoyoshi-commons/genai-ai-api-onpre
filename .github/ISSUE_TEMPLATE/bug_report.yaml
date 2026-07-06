@@ -1,0 +1,32 @@
+name: バグレポート
+description: バグの詳細について記載してください。
+title: "バグの概要"
+labels: [bug]
+assignees: "-"
+body:
+  - type: checkboxes
+    attributes:
+      label: 事前確認（1/2）
+      options:
+        - label: README.mdの「Issue / Pull Request の対応方針」を確認しましたか
+          required: true
+  - type: checkboxes
+    attributes:
+      label: 事前確認（2/2）
+      options:
+        - label: Issuesに同一のバグレポートがないか確認しましたか
+          required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: バグが再現した環境情報
+      description: バグが再現した環境情報（OSやバージョン等）を記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: overview
+    attributes:
+      label: バグ概要
+      description: 再現手順、バグの概要、期待される結果を記載してください。（必要に応じて画像を添付してください。）
+    validations:
+      required: true

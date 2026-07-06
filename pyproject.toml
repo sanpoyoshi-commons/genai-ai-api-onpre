@@ -1,0 +1,22 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+include = ["tools/**/*.py"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle: スタイルエラー
+    "F",    # Pyflakes: 未使用import、未定義変数等
+    "I",    # isort: importの並び順
+    "B",    # flake8-bugbear: よくあるバグパターンの検出
+    "UP",   # pyupgrade: 古い書き方を新しい構文に置換
+    "N",    # pep8-naming: 命名規則チェック
+    "SIM",  # flake8-simplify: コードの簡略化提案
+    "S",    # flake8-bandit: セキュリティ問題の検出
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test*.py" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,0 +1,269 @@
+// ローカル運用版 業務 DB スキーマ（本プロジェクト自前設計）。
+// DynamoDB 4 テーブル → PostgreSQL 7 テーブル正規化。user_id は Keycloak sub を TEXT で受ける。
+// Prisma 7 の prisma-client generator（ESM 出力）。生成物は src/generated/prisma（.gitignore 対象）。
+// 日時は TIMESTAMPTZ（@db.Timestamptz）＝双方向移行性（DynamoDB ISO 8601）に合わせる。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+// Prisma 7：接続 URL は schema から廃止。migrate 用 URL は prisma.config.ts、
+// ランタイムは driver adapter（@prisma/adapter-pg）を PrismaClient に渡す。
+datasource db {
+  provider = "postgresql"
+}
+
+model Team {
+  id        String   @id
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  teamUsers TeamUser[]
+  exApps    ExApp[]
+
+  @@map("teams")
+}
+
+model TeamUser {
+  teamId    String   @map("team_id")
+  userId    String   @map("user_id") // Keycloak sub
+  username  String // 表示名スナップショット
+  isAdmin   Boolean  @map("is_admin") // チームスコープ admin（認可層2、グローバルロールとは別レイヤー）
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@index([userId]) // GSI-1 逆引き相当（ある user が属する team 一覧）
+  @@map("team_users")
+}
+
+model Chat {
+  chatId      String    @id @map("chat_id")
+  userId      String    @map("user_id")
+  title       String?
+  createdDate DateTime  @default(now()) @map("created_date") @db.Timestamptz(6)
+  updatedDate DateTime  @default(now()) @updatedAt @map("updated_date") @db.Timestamptz(6)
+  expireAt    DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  messages Message[]
+
+  @@index([userId, createdDate(sort: Desc)])
+  @@index([expireAt])
+  @@map("chats")
+}
+
+model Message {
+  chatId      String    @map("chat_id")
+  createdDate String    @map("created_date") // <timestamp>#0 形式維持のため TEXT
+  userId      String    @map("user_id")
+  role        String // user / assistant / system
+  content     Json // マルチパート
+  feedback    String?
+  llmType     String?   @map("llm_type") // 0-17 で具体化
+  expireAt    DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  chat Chat @relation(fields: [chatId], references: [chatId], onDelete: Cascade)
+
+  @@id([chatId, createdDate])
+  @@index([userId])
+  @@index([feedback])
+  @@index([expireAt])
+  @@map("messages")
+}
+
+model SystemContext {
+  id            String    @id
+  userId        String    @map("user_id")
+  title         String
+  systemContext String    @map("system_context")
+  createdDate   DateTime  @default(now()) @map("created_date") @db.Timestamptz(6)
+  expireAt      DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  @@index([userId])
+  @@index([expireAt])
+  @@map("system_contexts")
+}
+
+model ExApp {
+  teamId      String   @map("team_id")
+  exAppId     String   @map("ex_app_id")
+  name        String
+  description String?
+  config      Json // エンドポイント / シークレット参照 / ストリーミング等
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, exAppId])
+  @@map("ex_apps")
+}
+
+model InvokeExAppHistory {
+  teamId            String    @map("team_id")
+  exAppId           String    @map("ex_app_id")
+  userId            String    @map("user_id")
+  createdDate       DateTime  @default(now()) @map("created_date") @db.Timestamptz(6)
+  teamNameSnapshot  String    @map("team_name_snapshot")
+  exAppNameSnapshot String    @map("ex_app_name_snapshot")
+  inputs            Json
+  outputs           Json?
+  status            String // running / success / error 等
+  // 非同期 ExApp（202＋status_url）の外部状態。worker が初回 POST で受領した status_url／request_id を
+  // 永続化し、以後の受信で polling する（worker-centric・既存 backoff/再配信に乗せる）。同期 ExApp では null。
+  statusUrl         String?   @map("status_url")
+  externalRequestId String?   @map("external_request_id")
+  expireAt          DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  // FK は意図的に貼らない（履歴は team/ex_app/user 削除後も残す）
+
+  @@id([teamId, exAppId, userId, createdDate])
+  @@index([userId])
+  @@index([teamId, exAppId])
+  @@index([expireAt])
+  @@map("invoke_ex_app_histories")
+}
+
+// ExApp 呼び出し用シークレット（apiKey）の格納先（ApiKeyStore 実ストアの永続層）。
+// 上流は Secrets Manager（APP_ENV スコープ）に保持しアプリ登録レコードには持たせない。ローカルは GUI から
+// per-app に動的増加するため docker secrets（静的ファイル）ではなく専用テーブルに保存する。既定は平文・
+// EXAPP_APIKEY_ENC_KEY 設定時はアプリ層 AES-256-GCM で暗号化（value=暗号文 base64・enc_iv=IV base64）。
+// team/ex_app スコープ（createExApp/updateExApp/copyExApp/deleteExApp/deleteTeam が読み書き）。
+model ExAppApiKey {
+  teamId    String   @map("team_id")
+  exAppId   String   @map("ex_app_id")
+  value     String // 平文 or AES-256-GCM 暗号文（base64、enc_iv 有無で判別）
+  encIv     String?  @map("enc_iv") // 暗号化時のみ：IV(base64)。auth tag は value 末尾に連結する
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // FK は意図的に貼らない（ApiKeyStore は別系統・補償なしの 2 段書き＝上流踏襲）
+
+  @@id([teamId, exAppId])
+  @@map("ex_app_api_keys")
+}
+
+// 文字起こしジョブの状態ストア（DB ジョブ＋専用ワーカー）。
+// 上流は AWS Transcribe のマネージド非同期に状態を委ねるが、ローカル（Whisper 系＝同期 API）は
+// 状態の真実を本テーブルに持つ。api（startTranscription）が status=QUEUED で起票し jobName を返却、
+// worker（pollTranscriptionStatus）が音声 DL→Whisper→正規化→COMPLETED/FAILED へ書き戻す。
+// status は AWS Transcribe 語彙（QUEUED / IN_PROGRESS / COMPLETED / FAILED）に揃える。
+// transcripts は完了時のみ（話者マージ／日本語スペース除去済みの Transcript[]）を JSONB で持つ。
+model TranscriptionJob {
+  jobName      String    @id @map("job_name")
+  ownerUserId  String    @map("owner_user_id") // 所有権突合（起票 userId＝Keycloak sub）
+  audioKey     String    @map("audio_key") // 所有権プレフィックス付きストレージキー（audio バケット）
+  status       String // QUEUED / IN_PROGRESS / COMPLETED / FAILED
+  speakerLabel Boolean   @map("speaker_label") // 現状は非対応（受領のみ・単一話者で返す）
+  maxSpeakers  Int       @map("max_speakers")
+  languageCode String?   @map("language_code") // 完了時に検出言語を埋める
+  transcripts  Json? // 完了時のみ（Transcript[]＝正規化済み）
+  error        String? // FAILED 時の理由（運用観測用・応答には載せない）
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  expireAt     DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  @@index([ownerUserId])
+  @@index([expireAt])
+  @@map("transcription_jobs")
+}
+
+// RAG 元文書テーブル（上流 AWS query-expansion-rag 経路に faithful＝chunk 本文全体 embedding）。
+// 元文書テーブル＋モデル別テーブルの 2 層構成。
+// 上流 lawsy の app_laws_master/app_laws_for_indexing 分離思想を一般文書 RAG に写像した 2 層の上層。
+// 所有権は owner_user_id（Keycloak sub）で持ち、検索を本人文書にスコープする。
+model SourceDocument {
+  id          String    @id @map("id")
+  ownerUserId String    @map("owner_user_id") // 起票 userId＝Keycloak sub（検索スコープ）
+  title       String // 元文書タイトル（参照表示用）
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  expireAt    DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  chunks RagChunk[]
+
+  @@index([ownerUserId])
+  @@index([expireAt])
+  @@map("rag_source_documents")
+}
+
+// RAG チャンクテーブル（モデル別テーブル＝ruri 768 次元専用）。チャンク本文と embedding を同一行に
+// 持つ（上流 AWS Bedrock KB の textField/vectorField 同居と同形）。embedding は pgvector の vector(768)＝
+// Prisma 未対応型のため Unsupported で宣言し、挿入/検索は RagRepository の raw SQL で行う（Prisma Client
+// では embedding 列を読み書きしない）。HNSW（cosine）と pg_bigm GIN（gin_bigm_ops）インデックスは migration
+// で付与（Prisma の @@index では演算子クラスを表現できないため）。
+model RagChunk {
+  id          String   @id @map("id")
+  documentId  String   @map("document_id")
+  ownerUserId String   @map("owner_user_id") // 検索スコープ用に非正規化保持（document と同値）
+  chunkIndex  Int      @map("chunk_index") // 文書内の連番（0 起点）
+  chunkText   String   @map("chunk_text") // チャンク本文（embedding 対象・pg_bigm 全文検索対象）
+  headerPath  String?  @map("header_path") // C-4 の見出し階層（"H1 > H2" 等・参照表示用）
+  // embedding vector(768) は migration で追加（Unsupported＝Prisma Client は触らない／raw SQL 専用）。
+  embedding   Unsupported("vector(768)")?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  document SourceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([ownerUserId])
+  @@map("rag_chunks")
+}
+
+// ── 法令 RAG（上流 lawsy-custom-bq を pgvector で再現）──
+// 法令データは e-Gov 由来のグローバル公開データ（dump 配布＝#P4-Pub）。本人スコープの一般 RAG
+// （rag_*）と違い owner_user_id を持たない。3 層：dwh_laws（全履歴・MERGE 先）→ app_laws_master
+// （法令名照合）＋ app_laws_for_indexing（条文・本文検索）。embedding は ruri 768 次元、PLaMo
+// （2048）採用時は 別 embedding モデル用テーブルとして別途追加（PLaMo-serving 再検討）。
+// embedding は Unsupported で宣言し raw SQL 専用、生成・vector index は後段。チャンク＝条（Article）。
+
+// DWH 層：全履歴（embedding なし）。Source 層 JSONL を MERGE する先。load_timestamp で版を識別。
+model DwhLaw {
+  lawId          String    @map("law_id")
+  lawNum         String    @map("law_num")
+  lawTitle       String    @map("law_title")
+  uniqueAnchor   String    @map("unique_anchor") // "{Main|Suppl}_Article_{Num}"
+  anchor         String?   @map("anchor") // 本則のみ e-Gov アンカー（Mp-At_{num}）
+  content        String    @map("content") // format_article_text 整形済み条文
+  articleSummary String?   @map("article_summary") // ArticleCaption or 先頭 ParagraphSentence
+  era            String?   @map("era")
+  year           Int?      @map("year")
+  lawType        String?   @map("law_type")
+  promulgateDate DateTime? @map("promulgate_date") @db.Date
+  loadTimestamp  DateTime  @default(now()) @map("load_timestamp") @db.Timestamptz(6)
+
+  @@id([lawId, uniqueAnchor])
+  @@map("dwh_laws")
+}
+
+// App 層・法令マスタ：law_num ごと最新版の法令名。法令名の並列ベクトル検索（lawsy 踏襲）。
+model AppLawMaster {
+  lawNum         String    @id @map("law_num")
+  lawTitle       String    @map("law_title")
+  promulgateDate DateTime? @map("promulgate_date") @db.Date
+  // 法令名照合用 embedding（後段で生成）。
+  lawTitleEmbedding Unsupported("vector(768)")? @map("law_title_embedding")
+
+  @@map("app_laws_master")
+}
+
+// App 層・条文インデックス：law_num+unique_anchor ごと最新版。本文ベクトル検索の対象
+// （pgvector content_embedding + pg_bigm content の RRF ハイブリッド）。
+model LawArticle {
+  lawNum         String  @map("law_num")
+  lawId          String  @map("law_id")
+  lawTitle       String  @map("law_title")
+  uniqueAnchor   String  @map("unique_anchor")
+  anchor         String? @map("anchor")
+  content        String  @map("content") // pg_bigm 全文検索対象
+  articleSummary String? @map("article_summary")
+  // 本文ベクトル検索用 embedding（後段で生成）。
+  contentEmbedding Unsupported("vector(768)")? @map("content_embedding")
+
+  @@id([lawNum, uniqueAnchor])
+  @@map("app_laws_for_indexing")
+}

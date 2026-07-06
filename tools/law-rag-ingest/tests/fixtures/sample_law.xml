@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Law Era="Reiwa" Year="2" LawType="Act" PromulgateMonth="4" PromulgateDay="1">
+  <LawNum>令和二年法律第一号</LawNum>
+  <LawBody>
+    <LawTitle>テスト法</LawTitle>
+    <MainProvision>
+      <Article Num="1">
+        <ArticleCaption>（目的）</ArticleCaption>
+        <ArticleTitle>第一条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphNum/>
+          <ParagraphSentence><Sentence>この法律は、テストを目的とする。</Sentence></ParagraphSentence>
+        </Paragraph>
+      </Article>
+      <Article Num="2" Delete="true">
+        <ArticleTitle>第二条</ArticleTitle>
+      </Article>
+      <Article Num="3">
+        <ArticleCaption>（定義）</ArticleCaption>
+        <ArticleTitle>第三条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphNum/>
+          <ParagraphSentence><Sentence>この法律において次の用語を定める。</Sentence></ParagraphSentence>
+          <Item Num="1">
+            <ItemTitle>一</ItemTitle>
+            <ItemSentence><Sentence>テストとは検証をいう。</Sentence></ItemSentence>
+          </Item>
+        </Paragraph>
+      </Article>
+      <Article Num="4:5">
+        <ArticleTitle>第四条及び第五条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphNum/>
+          <ParagraphSentence><Sentence>削除</Sentence></ParagraphSentence>
+        </Paragraph>
+      </Article>
+    </MainProvision>
+    <SupplProvision>
+      <Article Num="1">
+        <ArticleCaption>（施行期日）</ArticleCaption>
+        <ArticleTitle>第一条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphSentence><Sentence>この法律は、公布の日から施行する。</Sentence></ParagraphSentence>
+        </Paragraph>
+      </Article>
+    </SupplProvision>
+    <SupplProvision AmendLawNum="令和三年法律第五号">
+      <Article Num="1">
+        <ArticleTitle>第一条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphSentence><Sentence>改正附則の条文であり、取り込み対象から除外される。</Sentence></ParagraphSentence>
+        </Paragraph>
+      </Article>
+    </SupplProvision>
+  </LawBody>
+</Law>
