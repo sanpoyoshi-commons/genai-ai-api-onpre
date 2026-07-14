@@ -173,6 +173,17 @@ psqlx -c "CREATE INDEX ON _law_keys_new (law_id, unique_anchor);"
 数十万規模なら data.jsonl 生成ミスを疑い、ここで中断して原因を確認する）:
 
 ```bash
+# （Release notes 素材）削除対象の法令別内訳を先に記録する。DELETE 後は復元できないため、
+# 取るならこのタイミングが唯一。
+psqlx -tA -F'	' <<'SQL' > ~/work/genai-deploy-onpre/.law-build/deleted-report-$(date +%Y%m%d).tsv
+SELECT d.law_title, d.law_num, count(*) AS deleted_rows
+  FROM dwh_laws d
+ WHERE NOT EXISTS (SELECT 1 FROM _law_keys_new k
+                   WHERE k.law_id = d.law_id AND k.unique_anchor = d.unique_anchor)
+ GROUP BY d.law_title, d.law_num
+ ORDER BY deleted_rows DESC, d.law_title;
+SQL
+
 psqlx -c "DELETE FROM dwh_laws d
           WHERE NOT EXISTS (SELECT 1 FROM _law_keys_new k
                             WHERE k.law_id = d.law_id AND k.unique_anchor = d.unique_anchor);"
@@ -229,6 +240,17 @@ psqlx -c "SELECT count(*) FROM app_laws_master       WHERE law_title_embedding I
 
 # retrieve 疎通（任意・メンテナ環境のベンチ用ハーネスで smoke 確認）
 
+# （Release notes 素材）再 embedding された条文＝「本文が旧データのどの条文とも一致しない行」の
+# 法令別内訳。_law_emb_keep_content を使うため、作業テーブル掃除の前が唯一の機会。
+# ※新規制定と改正の区別はつかない（テキスト差分ベースのため）。削除分の内訳は D-3 で記録済み。
+psqlx -tA -F'	' <<'SQL' > ~/work/genai-deploy-onpre/.law-build/diff-report-$(date +%Y%m%d).tsv
+SELECT a.law_title, a.law_num, count(*) AS changed_articles
+  FROM app_laws_for_indexing a
+ WHERE NOT EXISTS (SELECT 1 FROM _law_emb_keep_content k WHERE k.content_md5 = md5(a.content))
+ GROUP BY a.law_title, a.law_num
+ ORDER BY changed_articles DESC, a.law_title;
+SQL
+
 # 作業テーブルを掃除
 psqlx -c "DROP TABLE IF EXISTS _law_emb_keep_content, _law_emb_keep_title, _law_keys_new;"
 
@@ -237,7 +259,9 @@ cd ~/work/genai-deploy-onpre && ./scripts/law-rag-export.sh
 ```
 
 Release タグは e-Gov 取得日で `law-rag-<YYYYMMDD>`（アセット名は `law-rag.dump` にリネーム）
-＝ `scripts/law-rag-export.sh` ヘッダの命名規約どおり。
+＝ `scripts/law-rag-export.sh` ヘッダの命名規約どおり。D-3／D-7 で記録した法令別内訳
+（deleted-report／diff-report）は Release notes の差分内訳に使い、あわせて deploy リポの
+`CHANGELOG.md` に dump 更新エントリ（1 行サマリ＋Release notes へのリンク）を追加する。
 
 ### 制約・注意
 
