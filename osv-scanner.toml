@@ -1,0 +1,19 @@
+# osv-scanner の pre-push ゲート（.pre-commit-config.yaml の osv-scanner フック）向け triage 設定。
+# 走査対象は package-lock.json。ここに載せるのは「現時点で安全に修正できない」脆弱性のみに限り、
+# 理由（配信到達性・修正版の互換性）と再評価期日（ignoreUntil）を必ず併記する。
+# 直接修正できるものは overrides で fixed 版へ上げる方針（本ファイルには載せない）。
+
+# @hono/node-server: prisma@7.8.0（devDependency）の @prisma/dev 経由の推移依存。
+# ビルド時ツールチェーン専用で配信物（dist）には含まれない。修正版 2.0.5 はメジャー更新で
+# @prisma/dev（1.19.x を要求）を壊すため強制上書きしない。Prisma 側の更新での解消を待つ。
+[[IgnoredVulns]]
+id = "GHSA-frvp-7c67-39w9"
+ignoreUntil = 2026-09-30
+reason = "dev-only, prisma@7.8.0 build tooling via @prisma/dev; fix 2.0.5 is a major bump breaking @prisma/dev; not in runtime dist. Re-evaluate when prisma updates."
+
+# valibot: 同じく @prisma/dev 経由の推移依存で @prisma/dev が 1.2.0 に固定。1.4.2 への上書きは
+# @prisma/dev を壊しうる。ビルド時のみ・配信非到達。Prisma 側の更新での解消を待つ。
+[[IgnoredVulns]]
+id = "GHSA-5qjj-4xww-7phc"
+ignoreUntil = 2026-09-30
+reason = "dev-only, prisma@7.8.0 build tooling via @prisma/dev pinning valibot 1.2.0; not in runtime dist. Re-evaluate when prisma updates."
