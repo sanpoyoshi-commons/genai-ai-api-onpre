@@ -54,12 +54,20 @@ function makePrisma(opts: {
   nearest?: Array<{ law_num: string; law_title: string; score: number }>;
   byQuery?: Array<{ law_num: string; law_title: string; score: number }>;
   articles?: unknown[];
+  versions?: unknown[];
+  meta?: unknown[];
 }): { prisma: PrismaClient; calls: string[] } {
   const calls: string[] = [];
   const prisma = {
     async $queryRaw(strings: TemplateStringsArray, ..._values: unknown[]) {
       const sql = strings.join(' ');
       calls.push(sql.replace(/\s+/g, ' ').trim());
+      if (sql.includes('law_rag_meta')) {
+        return opts.meta ?? [];
+      }
+      if (sql.includes('next_enforce')) {
+        return opts.versions ?? [];
+      }
       if (sql.includes('law_size')) {
         return opts.articles ?? [];
       }
@@ -283,4 +291,69 @@ test('getFullArticles returns [] when either list is empty', async () => {
   const r = new LawRetriever(fakeEmbedding, prisma);
   assert.deepEqual(await r.getFullArticles([], ['a']), []);
   assert.deepEqual(await r.getFullArticles(['L1'], []), []);
+});
+
+// ── as-of: resolveVersionsAsOf ─────────────────
+
+test('resolveVersionsAsOf maps rows into a keyed version map', async () => {
+  const { prisma, calls } = makePrisma({
+    versions: [
+      {
+        law_num: 'N1',
+        unique_anchor: 'Main_Article_2',
+        law_id: 'ID9_20280401_x',
+        content: '未施行本則',
+        article_summary: null,
+        anchor: null,
+        enforce_date: '2028-04-01',
+        is_future: true,
+        next_enforce: null,
+      },
+    ],
+  });
+  const r = new LawRetriever(fakeEmbedding, prisma);
+  const map = await r.resolveVersionsAsOf(
+    [{ lawNum: 'N1', uniqueAnchor: 'Main_Article_2' }],
+    '2030-01-01',
+  );
+  const v = map.get('N1 Main_Article_2') ?? map.get('N1 Main_Article_2');
+  assert.ok(v, 'resolved version present');
+  assert.equal(v?.lawId, 'ID9_20280401_x');
+  assert.equal(v?.content, '未施行本則');
+  assert.equal(v?.enforceDate, '2028-04-01');
+  assert.equal(v?.isFuture, true);
+  // as_of の版解決は dwh_laws への 1 クエリ（next_enforce を含む）で行う。
+  assert.ok(calls.some((c) => c.includes('next_enforce')));
+});
+
+test('resolveVersionsAsOf: 空キー/不正日付は DB を触らず空マップ', async () => {
+  const { prisma, calls } = makePrisma({ versions: [{ law_num: 'x' }] });
+  const r = new LawRetriever(fakeEmbedding, prisma);
+  assert.equal((await r.resolveVersionsAsOf([], '2030-01-01')).size, 0);
+  assert.equal(
+    (await r.resolveVersionsAsOf([{ lawNum: 'N1', uniqueAnchor: 'a' }], 'bad-date')).size,
+    0,
+  );
+  assert.equal(calls.length, 0);
+});
+
+// ── as-of: getLawRagMeta（キャッシュ） ──────────
+
+test('getLawRagMeta reads once and caches (single-row meta)', async () => {
+  const { prisma, calls } = makePrisma({
+    meta: [{ egov_fetch_date: '2026-08-01', release_tag: 'law-rag-20260802' }],
+  });
+  const r = new LawRetriever(fakeEmbedding, prisma);
+  const m1 = await r.getLawRagMeta();
+  const m2 = await r.getLawRagMeta();
+  assert.deepEqual(m1, { egovFetchDate: '2026-08-01', releaseTag: 'law-rag-20260802' });
+  assert.deepEqual(m2, m1);
+  // 2 回呼んでも DB は 1 回だけ（プロセス内キャッシュ）。
+  assert.equal(calls.filter((c) => c.includes('law_rag_meta')).length, 1);
+});
+
+test('getLawRagMeta returns null when meta absent (焼き込みなし＝as-of 導入前と同一)', async () => {
+  const { prisma } = makePrisma({ meta: [] });
+  const r = new LawRetriever(fakeEmbedding, prisma);
+  assert.equal(await r.getLawRagMeta(), null);
 });

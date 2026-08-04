@@ -16,10 +16,13 @@
 --     ORDER BY promulgate_date DESC, law_id DESC の rn=1 で「最も新しい版」を採るが、
 --     e-Gov 一括データは 1 法令を施行日ごとの複数版（law_id=「法令ID_施行日_改正法ID」）で持ち、
 --     promulgate_date は版間で不変（＝tie）なので実質 law_id DESC が効き、結果として
---     「最も未来の施行日＝未施行版」の本文を採る。本リポは現行施行版を返すため
---     「施行日 ≤ 今日(JST) の版のうち施行日最新」に限定する（施行日は law_id の中間フィールド）。
---     施行日が今日以前の版を持たない条文（将来改正で新設される条文）は現行法ではないので
---     索引に入れない（将来的に施行日/未施行フラグを持たせ as-of で時点解決する想定）。
+--     「最も未来の施行日＝未施行版」の本文を採る。本リポは現行施行版を優先するため
+--     「施行日 ≤ 今日(JST) の版があればそのうち施行日最新（現行施行版・is_future=false）」を採る。
+--   - as-of 対応：施行日が今日以前の版を持たない条文（将来改正で新設される条文）も、
+--     将来版のうち施行日最早を代表として **is_future=true** で索引に追加する（意味検索で位置特定
+--     できるように embedding 対象へ入れる）。既定モードは retrieve 側で WHERE is_future=false により
+--     除外する（無印で現行索引に混ぜると「未施行本文採用」の元欠陥の縮小再生産になるため）。
+--     施行日(enforce_date)は 01_update_dwh.sql が law_id から実カラム化済み。
 --   - 上流ステップ3（CREATE VECTOR INDEX / IVF）は後段（HNSW 仮置き・ivfflat はベンチ後）。
 
 -- ステップ1: 法令マスタ app_laws_master（law_num ごと最新版の法令名）。
@@ -31,32 +34,42 @@ FROM dwh_laws
 ORDER BY law_num, promulgate_date DESC NULLS LAST, load_timestamp DESC, law_title;
 -- law_title_embedding は NULL のまま（後段で生成）。
 
--- ステップ2: 条文インデックス app_laws_for_indexing（施行日≤今日(JST) のうち施行日最新＝現行施行版）。
---   施行日 = law_id の中間フィールド（law_id は「法令ID_YYYYMMDD施行日_改正法ID」の 3 部構成）。
---   現行施行版に限定する理由・上流との差異はファイル冒頭「上流との差分」を参照。
+-- ステップ2: 条文インデックス app_laws_for_indexing（現行施行版＝is_future=false／将来のみ新設＝is_future=true）。
+--   施行日 enforce_date = law_id の中間フィールド YYYYMMDD の実カラム化（01_update_dwh.sql が充填）。
+--   条文（law_num, unique_anchor）ごとに 1 版だけ索引する：
+--     ・現行版（enforce_date ≤ 今日 JST）があれば、そのうち施行日最新を採り is_future=false。
+--     ・現行版が無い（将来改正で新設される）条文は、将来版のうち施行日最早を代表に採り is_future=true。
+--   選別理由・上流との差異はファイル冒頭「上流との差分」を参照。JST 明示は postgres の TimeZone が
+--   UTC のため（素の CURRENT_DATE では日付境界が UTC 判定になる）。
 TRUNCATE app_laws_for_indexing;
 INSERT INTO app_laws_for_indexing (
-  law_num, law_id, law_title, unique_anchor, anchor, content, article_summary
+  law_num, law_id, law_title, unique_anchor, anchor, content, article_summary, is_future
 )
 SELECT
-  law_num, law_id, law_title, unique_anchor, anchor, content, article_summary
+  law_num, law_id, law_title, unique_anchor, anchor, content, article_summary, is_future
 FROM (
   SELECT
     law_num, law_id, law_title, unique_anchor, anchor, content, article_summary,
+    (enforce_date > (now() AT TIME ZONE 'Asia/Tokyo')::date) AS is_future,
     ROW_NUMBER() OVER (
       PARTITION BY law_num, unique_anchor
-      ORDER BY to_date(split_part(law_id, '_', 2), 'YYYYMMDD') DESC, law_id DESC
+      ORDER BY
+        -- 現行版（施行日≤今日）を最優先。現行がある条文はその中で施行日最新、
+        -- 現行が無い条文（将来のみ新設）は将来版の中で施行日最早を代表に採る。
+        (enforce_date <= (now() AT TIME ZONE 'Asia/Tokyo')::date) DESC,
+        CASE WHEN enforce_date <= (now() AT TIME ZONE 'Asia/Tokyo')::date THEN enforce_date END DESC NULLS LAST,
+        CASE WHEN enforce_date >  (now() AT TIME ZONE 'Asia/Tokyo')::date THEN enforce_date END ASC  NULLS LAST,
+        law_id DESC
     ) AS rn
   FROM dwh_laws
-  -- 現行施行版のみを候補にする（施行日 ≤ 今日 JST）。施行日フィールドが 8 桁数字でない想定外の
-  -- law_id は to_date 失敗を避けるため除外（防御的・現データは 100% 準拠を実測）。JST 明示は
-  -- postgres の TimeZone が UTC のため（素の CURRENT_DATE では日付境界が UTC 判定になる）。
-  WHERE split_part(law_id, '_', 2) ~ '^[0-9]{8}$'
-    AND to_date(split_part(law_id, '_', 2), 'YYYYMMDD') <= (now() AT TIME ZONE 'Asia/Tokyo')::date
+  -- 施行日不明（想定外 law_id で 8 桁数字でない＝enforce_date が NULL）は索引に入れない
+  -- （従来の to_date 失敗除外と同義・防御的）。
+  WHERE enforce_date IS NOT NULL
 ) ranked
 WHERE rn = 1
   -- 削除 stub（本文が「削除」だけの範囲/単条削除条文）は検索ノイズなので App 層に入れない（所見 B・
   -- 防御的二重化＝取り込み側 xml_to_jsonl.is_deletion_stub と同条件）。先頭（タイトル）行を除いた本文を
   -- trim して「削除」だけの行を除外。本文に「削除」を含むだけの正当条文は全体一致しないため保持される。
   AND btrim(regexp_replace(content, '^[^' || E'\n' || ']*' || E'\n', ''), E' 　\n\t') <> '削除';
--- content_embedding は NULL のまま（後段で生成）。
+-- content_embedding は NULL のまま（後段で生成）。is_future の付与で既定モード（WHERE is_future=false）は
+-- as-of 導入前と同一の現行版集合になる（後方互換）。

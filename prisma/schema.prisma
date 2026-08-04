@@ -234,9 +234,13 @@ model DwhLaw {
   year           Int?      @map("year")
   lawType        String?   @map("law_type")
   promulgateDate DateTime? @map("promulgate_date") @db.Date
+  // 施行日（law_id 中間フィールド YYYYMMDD の実カラム化）。as-of 版解決に使う。取り込み側
+  // （01_update_dwh.sql の INSERT）が充填する。読み取りは raw SQL 専用（Client からは書かない）。
+  enforceDate    DateTime? @map("enforce_date") @db.Date
   loadTimestamp  DateTime  @default(now()) @map("load_timestamp") @db.Timestamptz(6)
 
   @@id([lawId, uniqueAnchor])
+  @@index([lawNum, uniqueAnchor, enforceDate], map: "dwh_laws_article_enforce_idx")
   @@map("dwh_laws")
 }
 
@@ -261,9 +265,23 @@ model LawArticle {
   anchor         String? @map("anchor")
   content        String  @map("content") // pg_bigm 全文検索対象
   articleSummary String? @map("article_summary")
+  // 未施行フラグ（as-of 対応）。現行施行版=false、将来のみ新設条文=true。
+  // 既定モードは WHERE is_future=false で除外（元欠陥＝未施行本文採用の再来を防ぐガード）。
+  isFuture       Boolean @default(false) @map("is_future")
   // 本文ベクトル検索用 embedding（後段で生成）。
   contentEmbedding Unsupported("vector(768)")? @map("content_embedding")
 
   @@id([lawNum, uniqueAnchor])
   @@map("app_laws_for_indexing")
+}
+
+// 法令 RAG メタ（as-of 対応）：データ基準日＝システムの知識時点（e-Gov 取得日）。dump 同梱で
+// 「データと表示が食い違わない」を担保し、レポート出典セクションへ 1 行焼き込む。単一行運用（id=1）。
+model LawRagMeta {
+  id            Int      @id @default(1)
+  egovFetchDate DateTime @map("egov_fetch_date") @db.Date // e-Gov 取得日＝データ基準日（焼き込みに使う）
+  releaseTag    String   @map("release_tag") // 配布タグ（例 law-rag-20260802）
+  builtAt       DateTime @default(now()) @map("built_at") @db.Timestamptz(6) // dump 生成日時（運用情報）
+
+  @@map("law_rag_meta")
 }

@@ -1,7 +1,11 @@
-import type {
-  ArticleWithSummary,
-  FullArticle,
-  LawRetrieverLike,
+import {
+  articleTitle,
+  egovUrl,
+  versionKey,
+  type ArticleWithSummary,
+  type FullArticle,
+  type LawRagMeta,
+  type LawRetrieverLike,
 } from '../../repositories/lawRetriever.js';
 import type { LawNameAliases, LawNameEstimator } from './lawNameEstimator.js';
 import {
@@ -13,12 +17,16 @@ import {
 import type { ArticleSelector } from './articleSelector.js';
 import type { ReportGenerator } from './reportGenerator.js';
 import {
+  buildReferenceMetas,
   buildReferences,
   finalizeReport,
+  resolveCitedReferences,
   toFullArticles,
+  type LawRagReferenceMeta,
 } from './lawReportUtils.js';
 import {
   ARTICLE_NUM_PATTERN,
+  buildAsOfNotice,
   buildMentionedArticlesPrefix,
   buildSubstitutionWarning,
   checkLawNameDivergence,
@@ -64,6 +72,29 @@ export const ERR_NO_ARTICLES =
 /** 全文化後に条文が空のときのエラー文（移植元踏襲）。 */
 export const ERR_NO_FULL_ARTICLES = '該当する条文が見つかりませんでした。';
 
+/** as_of_date の受理形式（YYYY-MM-DD）。 */
+export const AS_OF_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** as_of 指定時、その時点で施行されている該当条文が無かったときのエラー文（as-of 対応）。 */
+export const ERR_NO_VERSION_AT_ASOF =
+  '指定された時点（as_of_date）に施行されている該当条文が見つかりませんでした。日付を変えて再度お試しください。';
+
+/**
+ * レポート生成の結果（as-of 対応）。`report` は従来どおりの markdown（引用リンク・「## 出典」結合済み）で、
+ * それに UI バッジ用の構造化メタを添える。エラー時はメッセージを `report` に入れメタは付かない
+ * （呼び出し側＝route は `report` を outputs へそのまま載せる＝後方互換）。
+ */
+export interface LawReportResult {
+  /** 最終レポート markdown（またはエラーメッセージ）。 */
+  report: string;
+  /** 版解決に使った参照時点（as_of 指定時のみ）。 */
+  asOfDate?: string;
+  /** データ基準日メタ（law_rag_meta 未投入時は付かない）。 */
+  dataAsOf?: LawRagMeta;
+  /** 引用条文ごとの版メタ（エラー時は付かない）。 */
+  references?: LawRagReferenceMeta[];
+}
+
 /** オーケストレータ依存（注入式＝ユニットテストで fake 差し替え可）。 */
 export interface LawReportDeps {
   estimator: LawNameEstimator;
@@ -94,6 +125,7 @@ export class LawReportPipeline {
   private async fetchMentionedFull(
     query: string,
     articles: ArticleWithSummary[],
+    includeFuture: boolean,
   ): Promise<FullArticle[]> {
     const nums = [...(query ?? '').matchAll(ARTICLE_NUM_PATTERN)].map((m) => m[1]!);
     if (nums.length === 0) {
@@ -105,14 +137,17 @@ export class LawReportPipeline {
     }
     const uniqueAnchors = nums.map((n) => `Main_Article_${n}`);
     try {
-      return await this.deps.retriever.getFullArticles(lawNums, uniqueAnchors);
+      return await this.deps.retriever.getFullArticles(lawNums, uniqueAnchors, includeFuture);
     } catch {
       return [];
     }
   }
 
   /** summary のみ条文（100k 制限）を全文化する（移植元 _fetch_summary_only_full_content）。 */
-  private async fetchSummaryOnlyFull(articles: ArticleWithSummary[]): Promise<FullArticle[]> {
+  private async fetchSummaryOnlyFull(
+    articles: ArticleWithSummary[],
+    includeFuture: boolean,
+  ): Promise<FullArticle[]> {
     const summaryOnly = articles.filter((a) => a.isSummaryOnly);
     if (summaryOnly.length === 0) {
       return [];
@@ -123,10 +158,56 @@ export class LawReportPipeline {
       return [];
     }
     try {
-      return await this.deps.retriever.getFullArticles(lawNums, uniqueAnchors);
+      return await this.deps.retriever.getFullArticles(lawNums, uniqueAnchors, includeFuture);
     } catch {
       return [];
     }
+  }
+
+  /**
+   * as_of_date 時点の版へ finalArticles を差し替える（二段構えの「版を決める」段）。索引で位置特定した
+   * 条文キー（law_num, unique_anchor）ごとに dwh から as_of 時点の現行版を解決し、本文・law_id・URL を
+   * 差し替え、施行日／未施行／改正予定のメタを付ける。as_of 時点に該当版が無い条文は落とす。
+   */
+  private async resolveAsOf(articles: FullArticle[], asOfDate: string): Promise<FullArticle[]> {
+    const keys = articles
+      .filter((a) => a.lawNum)
+      .map((a) => ({ lawNum: a.lawNum!, uniqueAnchor: a.uniqueAnchor }));
+    const resolved = await this.deps.retriever.resolveVersionsAsOf(keys, asOfDate);
+    const out: FullArticle[] = [];
+    for (const a of articles) {
+      if (!a.lawNum) {
+        // 解決キーを持たない参照（fake 等）はそのまま通す（保険）。
+        out.push(a);
+        continue;
+      }
+      const v = resolved.get(versionKey(a.lawNum, a.uniqueAnchor));
+      if (!v) {
+        continue; // as_of 時点で該当版なし → drop。
+      }
+      out.push({
+        ...a,
+        lawId: v.lawId,
+        // 条見出しも解決した版のものへ組み直す。本文だけ差し替えると、出典行の見出し（索引＝現行版）と
+        // 引用本文（as_of 版）が別の版になり「どの版で答えたか」の表示が食い違う。
+        title: a.lawTitle ? articleTitle(a.lawTitle, v.articleSummary) : a.title,
+        content: v.content ?? a.content,
+        anchor: v.anchor ?? a.anchor,
+        url: egovUrl(v.lawId, v.anchor),
+        enforceDate: v.enforceDate,
+        isFuture: v.isFuture,
+        nextEnforceDate: v.nextEnforceDate,
+      });
+    }
+    return out;
+  }
+
+  /** データ基準日の焼き込み 1 行を作る（law_rag_meta 未投入なら undefined＝焼き込みなし）。 */
+  private buildDataAsOfLine(meta: LawRagMeta | null): string | undefined {
+    if (!meta) {
+      return undefined;
+    }
+    return `データ基準日: ${meta.egovFetchDate}時点のe-Gov法令データ（${meta.releaseTag}）`;
   }
 
   /**
@@ -139,6 +220,7 @@ export class LawReportPipeline {
   private async retrieveArticles(
     query: string,
     lawNames: string[],
+    includeFuture: boolean,
   ): Promise<ArticleWithSummary[] | null> {
     let lawNums: string[];
     if (lawNames.length === 0) {
@@ -172,24 +254,48 @@ export class LawReportPipeline {
     }
 
     // 事前ランク：特定法令の内側でクエリ近傍 top-K に圧縮してから選別へ。
-    return this.deps.retriever.searchArticlesByContentInLaws(query, lawNums, PRERANK_TOP_K);
+    // as_of 指定時は未施行条文も候補に含める（後段の版解決で時点解決する）。
+    return this.deps.retriever.searchArticlesByContentInLaws(
+      query,
+      lawNums,
+      PRERANK_TOP_K,
+      includeFuture,
+    );
   }
 
-  /** 法令レポートを生成して返す（移植元 generate_law_report・エラー時はメッセージ文字列を返す）。 */
-  async generateReport(query: string, model: string, requestId: string): Promise<string> {
+  /**
+   * 法令レポートを生成して返す（移植元 generate_law_report・エラー時はメッセージ文字列を返す）。
+   *
+   * asOfDate（YYYY-MM-DD）を渡すと as-of モード：未施行条文も候補に含め、位置特定した
+   * 条文を as_of 時点の版へ構造的に解決して本文差し替え＋施行日/未施行/改正予定メタを付す。未指定なら
+   * 現行索引経路（as-of 導入前）を無改変で通す（後方互換）。いずれのモードでもデータ基準日を出典へ焼き込む。
+   *
+   * 戻り値はレポート markdown ＋ UI バッジ用の構造化メタ（引用条文ごとの版メタ・データ基準日・参照時点）。
+   * エラー時はメッセージのみ（`report`）を返す。
+   */
+  async generateReport(
+    query: string,
+    model: string,
+    requestId: string,
+    asOfDate?: string,
+  ): Promise<LawReportResult> {
+    // as_of は YYYY-MM-DD のみ受理（不正・未指定は既定経路＝as-of なし）。
+    const asOf = asOfDate && AS_OF_DATE_PATTERN.test(asOfDate) ? asOfDate : undefined;
+    const asOfMode = asOf !== undefined;
+
     // ① クエリから元法令名抽出（読み替え検出用に web 前表記を保持）。
     const queryLawNames = extractLawNamesFromQuery(query);
 
     // ② ローカル LLM 法令名推定。
     const lawNames = await this.deps.estimator.estimate(query, model, requestId);
 
-    // ③④ 施行令補完＋法令特定＋全条文取得（段2 空時はフォールバック）。
-    const articles0 = await this.retrieveArticles(query, lawNames);
+    // ③④ 施行令補完＋法令特定＋全条文取得（段2 空時はフォールバック）。as_of 時は未施行も候補に含める。
+    const articles0 = await this.retrieveArticles(query, lawNames, asOfMode);
     if (articles0 === null) {
-      return ERR_NO_LAW;
+      return { report: ERR_NO_LAW };
     }
     if (articles0.length === 0) {
-      return ERR_NO_ARTICLES;
+      return { report: ERR_NO_ARTICLES };
     }
 
     // ⑤ 読み替え・名称乖離の警告（回答冒頭での開示指示）。
@@ -204,10 +310,10 @@ export class LawReportPipeline {
 
     let finalArticles = toFullArticles(articles);
     if (finalArticles.length === 0) {
-      return ERR_NO_FULL_ARTICLES;
+      return { report: ERR_NO_FULL_ARTICLES };
     }
 
-    const mentionedFull = await this.fetchMentionedFull(query, articles);
+    const mentionedFull = await this.fetchMentionedFull(query, articles, asOfMode);
     if (mentionedFull.length > 0) {
       const anchors = new Set(mentionedFull.map((a) => a.uniqueAnchor));
       finalArticles = [
@@ -216,10 +322,18 @@ export class LawReportPipeline {
       ];
     }
 
-    const summaryFull = await this.fetchSummaryOnlyFull(articles);
+    const summaryFull = await this.fetchSummaryOnlyFull(articles, asOfMode);
     if (summaryFull.length > 0) {
       const map = new Map(summaryFull.map((a) => [a.uniqueAnchor, a]));
       finalArticles = finalArticles.map((a) => map.get(a.uniqueAnchor) ?? a);
+    }
+
+    // ⑦-2 as-of 版解決（as_of 指定時のみ）：位置特定した条文を as_of 時点の版へ差し替え＋メタ付与。
+    if (asOf) {
+      finalArticles = await this.resolveAsOf(finalArticles, asOf);
+      if (finalArticles.length === 0) {
+        return { report: ERR_NO_VERSION_AT_ASOF };
+      }
     }
 
     // ⑧ 参考情報組み立て＋警告プレフィックス（優先度順）＋レポート生成。
@@ -234,10 +348,24 @@ export class LawReportPipeline {
     if (substitutionWarning) {
       withWarnings = substitutionWarning + withWarnings;
     }
+    // as-of モードは参照時点の開示指示を最優先で前置（「どの版で答えたか」を黙らせない）。
+    if (asOf) {
+      withWarnings = buildAsOfNotice(asOf) + withWarnings;
+    }
 
     const report = await this.deps.generator.generate(query, withWarnings, model, requestId);
 
-    // ⑨ 引用リンク化・出典結合。
-    return finalizeReport(report, searchResults);
+    // ⑨ 引用リンク化・出典結合＋データ基準日焼き込み（常時・law_rag_meta 未投入なら焼き込みなし）。
+    const meta = await this.deps.retriever.getLawRagMeta();
+    const finalReport = finalizeReport(report, searchResults, this.buildDataAsOfLine(meta));
+
+    // ⑩ UI バッジ用の構造化メタ。焼き込み（markdown）と同じ引用参照から作るため両者は必ず一致する。
+    const references = buildReferenceMetas(resolveCitedReferences(report, searchResults));
+    return {
+      report: finalReport,
+      ...(asOf ? { asOfDate: asOf } : {}),
+      ...(meta ? { dataAsOf: meta } : {}),
+      references,
+    };
   }
 }

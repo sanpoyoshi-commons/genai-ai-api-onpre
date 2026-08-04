@@ -273,6 +273,41 @@ Release タグは e-Gov 取得日で `law-rag-<YYYYMMDD>`（アセット名は `
   事前バックアップから戻してやり直す。
 - D-5 の復元 UPDATE は index なしなら数分規模。D-4〜D-6 の間は法令 RAG 検索が実質使えない。
 
+## 時間軸 as-of（データ／API 層）
+
+法令データは e-Gov の時点断面で、1 条文が施行日ごとに複数版を持つ（`dwh_laws` は全版保持）。App 層の索引は
+「探す（意味検索）」専用、版の決定は「構造的に解決」する、という二段構えを採る（設計＝deploy `docs/law-rag-setup.md`
+「時間軸（as-of）」節）。
+
+- **スキーマ（migration `20260802000000_law_rag_asof`）**：
+  - `dwh_laws.enforce_date`（施行日の実カラム化＝`law_id` 中間フィールド `YYYYMMDD`。`01_update_dwh.sql` の
+    INSERT が充填。8 桁でない想定外 law_id は NULL）＋ 版解決用 index `(law_num, unique_anchor, enforce_date)`。
+  - `app_laws_for_indexing.is_future`（未施行フラグ）。既定モードは retrieve 側で `is_future=false` に絞り
+    as-of 導入前（現行索引）と同一集合になる（後方互換）。
+  - `law_rag_meta`（単一行）＝データ基準日（e-Gov 取得日）＋配布タグ。api 起動時に 1 度読みキャッシュし、
+    レポート「## 出典」節へ 1 行焼き込む（dump 同梱でデータと表示が食い違わない）。
+- **索引拡張（`02_rebuild_app_layer.sql`）**：現行版があればその最新（`is_future=false`）、無い条文（将来のみ
+  新設・約 2,304 件）は将来版の最早を代表に `is_future=true` で追加する。現行索引の再 embedding は不要で、
+  差分充填（`embed_fill.py` が NULL 行だけ）で新規分（≒2,304 件）だけを埋める。
+- **retrieve（`src/repositories/lawRetriever.ts` / `src/lib/lawRag/lawReportPipeline.ts`）**：
+  API `POST /law-rag/query` の `inputs.as_of_date`（YYYY-MM-DD・任意）。未指定＝現行（版解決を通さない＝
+  as-of 導入前と同一）。指定時は未施行も候補に含め、`resolveVersionsAsOf` が `dwh_laws` から as_of 時点の版
+  （施行日 ≤ as_of の最新）を解決して本文を差し替え、施行日／未施行／改正予定（次版施行日）を出典に付す。
+- **返却契約（web の施行日バッジ用）**：`{outputs, usageMetadata}` に加えて、以下を**兄弟フィールドとして追加**
+  する（無い場合は載らない＝`outputs` だけを読む従来クライアントは無改修で動く）。
+  - `references[]`＝引用条文ごとの版メタ（`n`＝本文の `[n]` に対応する元番号・非連続を保持／`title`／`url`／
+    `enforceDate`／`isFuture`／`nextEnforceDate`）。markdown の「## 出典」と**同じ引用参照**（`resolveCitedReferences`）
+    から組み立てるので、焼き込みと構造化メタは必ず一致する。
+  - `dataAsOf`＝データ基準日（`law_rag_meta`・未投入なら付かない）／`asOfDate`＝as_of 指定時のみ。
+  - 既定モード（as_of 未指定）は版解決を通さないため `enforceDate` は `law_id` 中間フィールドから導出する
+    （`enforceDateFromLawId`・追加クエリなし）。索引が現行版のみなので `isFuture` は false、`nextEnforceDate` は
+    null（改正予定の解決は as_of 指定時のみ）。
+- **この更新（law-rag-20260802）の作り方**：e-Gov は再取得せず、既存 08-01 dwh（配布 dump import 済み）に
+  対して ①migrate 適用 → ②修正版 `02_rebuild_app_layer.sql` 再実行（未施行 2,304 件が index へ復活）→
+  ③差分 embedding（新規分のみ）→ ④HNSW 再構築 → ⑤`law_rag_meta` 投入 → ⑥export（`law-rag-export.sh` に
+  `EGOV_FETCH_DATE=2026-08-01 RELEASE_TAG=law-rag-20260802`）。差分ビルドの embedding 退避・復元
+  （D-1〜D-7）と同じ枠組みで、①②が「スキーマ移行＋索引拡張」を担う。
+
 ## vector index ベンチ（HNSW vs ivfflat）＋ retrieve live 疎通
 
 取り込み段で「HNSW 仮置き」とした採用を実 255,680 行規模で確定し、retrieve パイプラインを疎通確認する工程。

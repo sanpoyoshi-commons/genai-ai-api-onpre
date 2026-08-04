@@ -3,6 +3,7 @@ import { createLlmAdapter } from '../../llm/factory.js';
 import type { Message } from '../../llm/types.js';
 import { getRequestLogger } from '../../middleware/requestContext.js';
 import type { UnrecordedMessage } from '../../types/genaiWeb.js';
+import { createByteFallbackDecoder, decodeByteFallback } from './byteFallback.js';
 import type { LlmClient, LlmGenerateInput } from './llmClient.js';
 
 /**
@@ -66,7 +67,8 @@ export class LlmAbstractionClient implements LlmClient {
         { event: 'llm_call_succeeded', latency_ms: Date.now() - startedAt },
         'llm call succeeded',
       );
-      return contentToString(output.message.content);
+      // バイトフォールバック表記（`<0xE3><0x80><0x80>` 等）が混ざる語彙があるためここで復号する。
+      return decodeByteFallback(contentToString(output.message.content));
     } catch (err) {
       log.error(
         {
@@ -95,13 +97,22 @@ export class LlmAbstractionClient implements LlmClient {
         requestId: input.requestId,
         temperature: input.temperature ?? this.defaultTemperature,
       });
+      // チャンク境界でバイトトークン列が分断されても復号できるよう逐次復号器を挟む。
+      const bytes = createByteFallbackDecoder();
       for await (const chunk of stream) {
         if (chunk.type === 'text_delta') {
-          yield chunk.text;
+          const text = bytes.push(chunk.text);
+          if (text) {
+            yield text;
+          }
         } else if (chunk.type === 'error') {
           // アダプタが error チャンクで返す経路（throw 経路は下の catch が握る）。
           throw chunk.error;
         }
+      }
+      const tail = bytes.flush();
+      if (tail) {
+        yield tail;
       }
       log.info(
         { event: 'llm_call_succeeded', streaming: true, latency_ms: Date.now() - startedAt },

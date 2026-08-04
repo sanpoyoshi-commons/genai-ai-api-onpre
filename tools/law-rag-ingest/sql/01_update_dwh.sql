@@ -35,9 +35,16 @@ WHEN MATCHED AND t.content <> s.content THEN
 WHEN NOT MATCHED THEN
   INSERT (
     law_id, law_num, law_title, unique_anchor, anchor, content, article_summary,
-    era, year, law_type, promulgate_date, load_timestamp
+    era, year, law_type, promulgate_date, load_timestamp, enforce_date
   )
   VALUES (
     s.law_id, s.law_num, s.law_title, s.unique_anchor, s.anchor, s.content,
-    s.article_summary, s.era, s.year, s.law_type, s.promulgate_date, CURRENT_TIMESTAMP
+    s.article_summary, s.era, s.year, s.law_type, s.promulgate_date, CURRENT_TIMESTAMP,
+    -- 施行日の実カラム化（as-of 版解決）。law_id 中間フィールド YYYYMMDD を DATE 化。
+    -- 8 桁数字でない想定外 law_id は NULL（防御的・migration の backfill と同式）。
+    CASE
+      WHEN split_part(s.law_id, '_', 2) ~ '^[0-9]{8}$'
+      THEN to_date(split_part(s.law_id, '_', 2), 'YYYYMMDD')
+      ELSE NULL
+    END
   );

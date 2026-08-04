@@ -14,6 +14,21 @@ import type { ArticleWithSummary } from '../../repositories/lawRetriever.js';
 /** クエリ中の「第N条」表記（移植元 _ARTICLE_NUM_PATTERN）。 */
 export const ARTICLE_NUM_PATTERN = /第(\d+)条/g;
 
+/**
+ * as-of 参照時点の開示指示（as-of 対応）。as_of_date 指定時のみ参考情報の先頭へ積み、
+ * 「どの版で答えたか」を回答冒頭で明示させる（信頼の核心＝時間軸の黙認防止）。
+ */
+export function buildAsOfNotice(asOfDate: string): string {
+  return [
+    '【参照時点の通知 - 回答の冒頭で必ず開示すること】',
+    `本回答は ${asOfDate} 時点で施行されている版を基準に条文を参照しています。`,
+    '未施行の条文には施行日を明示し、施行日が未定の場合はその旨を述べてください。',
+    'いずれの版が適用されるかは附則の経過措置により条ごとに異なるため、最終判断は利用者に委ねてください。',
+    '---',
+    '',
+  ].join('\n');
+}
+
 const PARTICLES = /[をにはがのもとでやへからまで等]/g;
 
 /** バイグラム Jaccard 係数で 2 法令名の類似度を返す（助詞除去後・移植元 _bigram_similarity）。 */
