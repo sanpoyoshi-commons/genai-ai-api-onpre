@@ -258,8 +258,9 @@ psqlx -c "DROP TABLE IF EXISTS _law_emb_keep_content, _law_emb_keep_title, _law_
 cd ~/work/genai-deploy-onpre && ./scripts/law-rag-export.sh
 ```
 
-Release タグは e-Gov 取得日で `law-rag-<YYYYMMDD>`（アセット名は `law-rag.dump` にリネーム）
-＝ `scripts/law-rag-export.sh` ヘッダの命名規約どおり。D-3／D-7 で記録した法令別内訳
+Release タグは配布日で `law-rag-<YYYYMMDD>`（アセット名は `law-rag.dump` にリネーム）
+＝ `scripts/law-rag-export.sh` ヘッダの命名規約どおり。データ基準日（e-Gov 取得日）はタグとは
+別で、dump 同梱の `law_rag_meta` が正。D-3／D-7 で記録した法令別内訳
 （deleted-report／diff-report）は Release notes の差分内訳に使い、あわせて deploy リポの
 `CHANGELOG.md` に dump 更新エントリ（1 行サマリ＋Release notes へのリンク）を追加する。
 
