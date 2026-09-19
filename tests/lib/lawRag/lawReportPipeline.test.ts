@@ -5,8 +5,10 @@ import type {
   ArticleWithSummary,
   FullArticle,
   LawCandidate,
+  LawEnforcementStatus,
   LawRagMeta,
   LawRetrieverLike,
+  LawTitleEntry,
   ResolvedVersion,
 } from '../../../src/repositories/lawRetriever.js';
 import { versionKey } from '../../../src/repositories/lawRetriever.js';
@@ -17,9 +19,15 @@ import { ReportGenerator } from '../../../src/lib/lawRag/reportGenerator.js';
 import {
   ERR_NO_ARTICLES,
   ERR_NO_LAW,
+  ERR_NO_MATCH,
   ERR_NO_VERSION_AT_ASOF,
   LawReportPipeline,
 } from '../../../src/lib/lawRag/lawReportPipeline.js';
+import {
+  extractLawIdentifier,
+  identifierKey,
+  normalizeLawName,
+} from '../../../src/lib/lawRag/lawNameIdentifier.js';
 
 const fixedLlm = (text: string): LlmClient => ({
   async generate() {
@@ -59,6 +67,31 @@ class FakeRetriever implements LawRetrieverLike {
   resolveAsOfCalls: Array<{ keys: ArticleKey[]; asOfDate: string }> = [];
   /** as-of：law_rag_meta（null＝未投入＝焼き込みなし）。 */
   meta: LawRagMeta | null = null;
+  /**
+   * 3 値判定：法令名マスタ。**既定は空**＝法令データ未投入とみなし従来経路へフォールバックするので、
+   * 既存テストは無改変で通る（後方互換の担保そのもの）。
+   */
+  titleIndex: LawTitleEntry[] = [];
+  /** 3 値判定：法令の施行状態（law_num → 状態）。 */
+  enforcement: LawEnforcementStatus[] = [];
+  /** 3 値判定：法令名ハイブリッド検索の候補。 */
+  titleCandidates: LawCandidate[] = [];
+  futureArticles: ArticleWithSummary[] = [];
+  titleHybridCalls: Array<{ query: string; k: number }> = [];
+
+  async getLawTitleIndex(): Promise<LawTitleEntry[]> {
+    return this.titleIndex;
+  }
+  async getLawEnforcementStatus(lawNums: string[]): Promise<LawEnforcementStatus[]> {
+    return this.enforcement.filter((e) => lawNums.includes(e.lawNum));
+  }
+  async searchLawTitlesHybrid(query: string, k: number): Promise<LawCandidate[]> {
+    this.titleHybridCalls.push({ query, k });
+    return this.titleCandidates;
+  }
+  async getFutureArticlesByLawNums(): Promise<ArticleWithSummary[]> {
+    return this.futureArticles;
+  }
 
   async resolveLawNums(lawNames: string[]): Promise<string[]> {
     this.resolveCalls.push(lawNames);
@@ -389,4 +422,111 @@ test('as_of 解決時は条見出しも解決版へ組み直す（見出しと�
   assert.ok(!res.references?.[0]?.title.includes('成年後見人'));
   assert.ok(res.report.includes('会社法 特定補助人'));
   assert.ok(!res.report.includes('成年後見人が取締役に就任するには'));
+});
+
+// ── 3 値応答（on-prem 独自追加・上流 Lawsy に無い経路）────────────────────────────
+
+/** LLM への入力を捕捉する fake（施行予定の通知が参考情報の先頭に積まれたかを見る）。 */
+function capturingLlm(text: string): { llm: LlmClient; seen: string[] } {
+  const seen: string[] = [];
+  return {
+    seen,
+    llm: {
+      async generate(req: Parameters<LlmClient['generate']>[0]) {
+        seen.push(JSON.stringify(req));
+        return text;
+      },
+      async *generateStream() {},
+    },
+  };
+}
+
+function titleEntry(lawNum: string, lawTitle: string): LawTitleEntry {
+  return {
+    lawNum,
+    lawTitle,
+    normalized: normalizeLawName(lawTitle),
+    identifier: identifierKey(extractLawIdentifier(lawTitle)),
+  };
+}
+
+test('3 値: 固有部分の一致する法令が無ければ条文を出さず【該当なし】を返す', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('u1', '宇宙基本法')];
+  retriever.titleCandidates = [{ lawNum: 'u1', lawTitle: '宇宙基本法', score: 0.2 }];
+  retriever.byContent = [makeArticle({ content: '出してはいけない条文' })];
+  const pipeline = makePipeline(retriever, '{"law_names":["宇宙移民法"]}', '# 出してはいけないレポート');
+  const res = await pipeline.generateReport('宇宙移民法の要件は', 'm', 'r');
+  assert.equal(res.report, ERR_NO_MATCH);
+  // 条文取得そのものへ進まない（近い法令の条文を一切引かない）。
+  assert.equal(retriever.contentCalls.length, 0);
+  assert.equal(res.references, undefined);
+});
+
+test('3 値: 本則が未施行の法令は【施行予定】として未施行条文を候補に含め、通知を前置する', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('b1', '防災庁設置法'), titleEntry('f1', '復興庁設置法')];
+  retriever.titleCandidates = [
+    { lawNum: 'b1', lawTitle: '防災庁設置法', score: 0.25 },
+    { lawNum: 'f1', lawTitle: '復興庁設置法', score: 0.06 },
+  ];
+  retriever.enforcement = [
+    {
+      lawNum: 'b1',
+      lawTitle: '防災庁設置法',
+      currentMainArticles: 0,
+      futureMainArticles: 19,
+      earliestFutureEnforceDate: '2026-12-31',
+      enforcementClause: 'この法律は、令和八年十二月三十一日までの間において政令で定める日から施行する。',
+    },
+    {
+      lawNum: 'f1',
+      lawTitle: '復興庁設置法',
+      currentMainArticles: 28,
+      futureMainArticles: 0,
+      earliestFutureEnforceDate: null,
+      enforcementClause: null,
+    },
+  ];
+  retriever.byContent = [
+    makeArticle({
+      lawNum: 'b1',
+      lawTitle: '防災庁設置法',
+      lawId: '508AC0000000061_20261231_000000000000000',
+      articleSummary: '（設置）',
+      content: '内閣に、防災庁を置く。',
+      isFuture: true, // 索引の未施行フラグ。
+    }),
+  ];
+  const cap = capturingLlm('# 防災庁設置法について\n内閣に置かれます [1]。');
+  const pipeline = new LawReportPipeline({
+    estimator: new LawNameEstimator(fixedLlm('{"law_names":[]}')),
+    selector: new ArticleSelector(fixedLlm('1')),
+    generator: new ReportGenerator(cap.llm),
+    retriever,
+  });
+  const res = await pipeline.generateReport('防災庁はもう設置されていますか', 'm', 'r');
+
+  // 誤って復興庁設置法へ吸着しない。
+  assert.deepEqual(retriever.contentCalls[0]?.lawNums, ['b1']);
+  // 未施行条文が答えそのものなので候補へ含める。
+  assert.equal(retriever.contentCalls[0]?.includeFuture, true);
+  // 施行予定の通知が LLM への参考情報に入る（施行日は断定させない文言つき）。
+  const sent = cap.seen.join('\n');
+  assert.ok(sent.includes('施行予定の通知'));
+  assert.ok(sent.includes('政令で定める日から施行する'));
+  assert.ok(res.report.startsWith('# 防災庁設置法について'));
+  // UI の施行日バッジは references[].isFuture で描かれる。未施行条文に「現行」を出さない。
+  assert.equal(res.references?.[0]?.isFuture, true);
+  assert.equal(res.references?.[0]?.enforceDate, '2026-12-31');
+});
+
+test('3 値: 法令名マスタが空なら従来経路（最近傍1件）へフォールバックする＝後方互換', async () => {
+  const retriever = new FakeRetriever(); // titleIndex 既定 []
+  retriever.lawNums = ['n1'];
+  retriever.byContent = [makeArticle({ content: '本文' })];
+  const pipeline = makePipeline(retriever, '{"law_names":["民法"]}', '# T\n本文 [1]。');
+  const res = await pipeline.generateReport('消滅時効は', 'm', 'r');
+  assert.equal(retriever.resolveCalls.length, 1);
+  assert.ok(res.report.includes('## 出典'));
 });

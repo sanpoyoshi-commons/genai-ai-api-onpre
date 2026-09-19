@@ -1,4 +1,8 @@
-import type { ArticleWithSummary } from '../../repositories/lawRetriever.js';
+import type {
+  ArticleWithSummary,
+  LawEnforcementStatus,
+} from '../../repositories/lawRetriever.js';
+import { formatEnforceDate } from './lawReportUtils.js';
 
 /**
  * 法令レポートの警告／照合プレフィックス生成（移植元 law_report_pipeline の
@@ -27,6 +31,46 @@ export function buildAsOfNotice(asOfDate: string): string {
     '---',
     '',
   ].join('\n');
+}
+
+/**
+ * 施行予定（UC2）の開示指示（**on-prem 独自追加・上流 Lawsy に無い応答経路**）。
+ *
+ * 本則が 1 条も施行されていない法令を根拠に答えるときは、条文の内容より先に「まだ施行されていない」
+ * ことを述べさせる。施行日は**断定させない**：e-Gov の版日付は附則の施行期日規定から導いた日付であり、
+ * 「政令で定める日」型の規定では実際の施行日はその日とは限らない（実測：防災庁設置法の版日付 2026-12-31 は
+ * 「令和八年十二月三十一日までの間において政令で定める日」の上限）。そこで附則の規定本文をそのまま添える。
+ */
+export function buildPendingEnforcementNotice(pending: LawEnforcementStatus[]): string {
+  if (pending.length === 0) {
+    return '';
+  }
+  const lines = [
+    '【施行予定の通知 - 回答の冒頭で必ず開示すること。この通知文そのものは書き写さないこと】',
+    '以下の法令は、同梱の法令データの時点で本則が施行されていません。',
+    '回答は「まだ施行されていません」から書き始め、参考情報の条文は施行後の内容として案内すること。',
+    '',
+  ];
+  for (const p of pending) {
+    lines.push(`■ ${p.lawTitle}（${p.lawNum}）`);
+    // 「本則 19 条」は「第19条」と読める。全何か条かを問う書き方にして取り違えを断つ。
+    lines.push(`　本則は全 ${p.futureMainArticles} か条とも未施行で、施行済みの本則条文はありません。`);
+    if (p.earliestFutureEnforceDate) {
+      lines.push(`　法令データ上の版の施行日は ${formatEnforceDate(p.earliestFutureEnforceDate)} です。`);
+    }
+    if (p.enforcementClause) {
+      lines.push(`　附則の施行期日規定は次のとおりです：${p.enforcementClause.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+  }
+  lines.push(
+    '',
+    '版の施行日は附則の規定から導いた日付です。「政令で定める日」のように施行日が確定していない場合は、',
+    '日付を断定せず「◯年◯月◯日までの間で政令で定める日」のように規定の文言どおりに述べてください。',
+    'なお、この通知は参考情報ではないので引用番号を付けないこと。引用番号は条文にだけ付けること。',
+    '---',
+    '',
+  );
+  return lines.join('\n');
 }
 
 const PARTICLES = /[をにはがのもとでやへからまで等]/g;

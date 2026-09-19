@@ -4,9 +4,17 @@ import {
   versionKey,
   type ArticleWithSummary,
   type FullArticle,
+  type LawEnforcementStatus,
   type LawRagMeta,
   type LawRetrieverLike,
 } from '../../repositories/lawRetriever.js';
+import { logger } from '../logger.js';
+import {
+  LAW_INDEX_UNAVAILABLE,
+  resolveLawMatch,
+  type LawMatchStage,
+  type RejectedLawCandidate,
+} from './lawMatchResolver.js';
 import type { LawNameAliases, LawNameEstimator } from './lawNameEstimator.js';
 import {
   applyLawNameAliases,
@@ -28,6 +36,7 @@ import {
   ARTICLE_NUM_PATTERN,
   buildAsOfNotice,
   buildMentionedArticlesPrefix,
+  buildPendingEnforcementNotice,
   buildSubstitutionWarning,
   checkLawNameDivergence,
 } from './lawReportWarnings.js';
@@ -45,6 +54,15 @@ import {
  *     救済し、minScore 未満で 0 件なら移植元同様のエラー文を返す。
  *   - web_hits / クエリ内 URL fetch は全省略（参考情報＝e-laws 条文のみ）。並列実行（ThreadPoolExecutor）は
  *     不要になったため逐次化。
+ *
+ * 上流との差分（3 値応答・2026-09-19 追加・明示）:
+ *   移植元は「回答」か「法令を特定できない」の 2 値しか持たず、法令特定は最近傍 1 件を無条件に採る
+ *   （距離の絶対値を見ない）。本実装は段2 を lawMatchResolver の判定階層へ置き換え、応答を 3 値にする：
+ *     【現行】    … 従来と同一の回答（後方互換）。
+ *     【施行予定】… 本則が未施行の法令。施行日と附則の施行期日規定を添え「まだ施行されていない」と答える。
+ *                   e-Gov 全版データを持つ本配布物だけが返せる応答で、**上流 Lawsy に対応経路は無い**。
+ *     【該当なし】… 固有部分の一致する法令が無い。**条文を一切提示しない**（近い法令を推測で出さない）。
+ *   法令名マスタが空の環境（データ未投入の開発 DB・ユニットテストの fake）では従来経路へフォールバックする。
  */
 
 /** 段2 空時フォールバックの近傍取得数。 */
@@ -71,6 +89,27 @@ export const ERR_NO_ARTICLES =
 
 /** 全文化後に条文が空のときのエラー文（移植元踏襲）。 */
 export const ERR_NO_FULL_ARTICLES = '該当する条文が見つかりませんでした。';
+
+/**
+ * 【該当なし】の応答文（**on-prem 独自追加**）。固有部分の一致する法令が無いときに返す。
+ * 近い名称の別法令を推測で提示しないことを明示する（設計 §3・§4-2 の安全側方針）。
+ */
+export const ERR_NO_MATCH =
+  'お尋ねの内容に該当する法令・条文が、同梱の法令データの中に見当たりませんでした。' +
+  '名称の近い別の法令を根拠として提示することは避けています。' +
+  '法令名がお分かりの場合は、正式名称を含めて質問し直してください。';
+
+/** 段2 の識別結果（3 値応答の分岐に使う）。 */
+type LawIdentification =
+  | { kind: 'current'; lawNums: string[]; stage?: LawMatchStage }
+  | {
+      kind: 'pending';
+      lawNums: string[];
+      pending: LawEnforcementStatus[];
+      stage: LawMatchStage;
+    }
+  | { kind: 'none'; stage: LawMatchStage; rejected: RejectedLawCandidate[] }
+  | { kind: 'unidentified' };
 
 /** as_of_date の受理形式（YYYY-MM-DD）。 */
 export const AS_OF_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -211,19 +250,56 @@ export class LawReportPipeline {
   }
 
   /**
-   * 法令名推定 → 法令特定 → 特定法令内の事前ランク top-K 条文（段2 空時はクエリ直近傍フォールバック）。
+   * 段2「法令特定」（3 値判定）。通称辞書→施行令補完まで従来どおり行い、判定は lawMatchResolver に委ねる。
    *
-   * 法令特定（law_num 解決）は移植元どおり法令名ベースのまま。選別器へ渡す前に、特定法令の内側で
-   * content_embedding 近傍 top-K（PRERANK_TOP_K）へ圧縮する（タスク3＝gemma 選別を可能なタスク化）。
-   * 戻り値: null=法令を特定できず（→ ERR_NO_LAW）、[]=特定したが条文 0（→ ERR_NO_ARTICLES）。
+   * 法令名マスタが空（法令データ未投入の開発 DB・ユニットテストの fake）のときは従来経路へフォールバックし、
+   * 既存挙動をそのまま通す（後方互換）。
    */
-  private async retrieveArticles(
+  private async identifyLaws(
     query: string,
     lawNames: string[],
-    includeFuture: boolean,
-  ): Promise<ArticleWithSummary[] | null> {
+    queryLawNames: string[],
+  ): Promise<LawIdentification> {
+    // 通称→正式名称を解決してから施行令補完（通称のままだと最近傍が別法を誤マッチするため）。
+    const searchLawNames =
+      lawNames.length > 0
+        ? expandLawNamesWithOrdinances(applyLawNameAliases(lawNames, this.aliases))
+        : [];
+    // クエリ本文の名乗りも同じ辞書を通す（「景品表示法」→「不当景品類及び不当表示防止法」）。
+    const spokenLawNames = applyLawNameAliases(queryLawNames, this.aliases);
+    const match = await resolveLawMatch(
+      this.deps.retriever,
+      query,
+      searchLawNames,
+      spokenLawNames,
+    );
+    if (match === LAW_INDEX_UNAVAILABLE) {
+      return this.identifyLawsLegacy(query, searchLawNames);
+    }
+    if (match.verdict === 'none') {
+      return { kind: 'none', stage: match.stage, rejected: match.rejected };
+    }
+    if (match.verdict === 'pending') {
+      return {
+        kind: 'pending',
+        stage: match.stage,
+        lawNums: match.lawNums,
+        pending: match.pending,
+      };
+    }
+    return { kind: 'current', stage: match.stage, lawNums: match.lawNums };
+  }
+
+  /**
+   * 従来経路（as-of 導入前と同一の法令特定）。法令名マスタを読めない環境だけが通る。
+   * 最近傍 1 件を無条件に採るため「該当なし」は出せない＝この経路では 2 値のままである点に注意。
+   */
+  private async identifyLawsLegacy(
+    query: string,
+    searchLawNames: string[],
+  ): Promise<LawIdentification> {
     let lawNums: string[];
-    if (lawNames.length === 0) {
+    if (searchLawNames.length === 0) {
       // on-prem フォールバック：クエリ自体を embed して law_title 近傍検索で法令特定。
       const candidates = await this.deps.retriever.searchLawsByQuery(
         query,
@@ -231,12 +307,10 @@ export class LawReportPipeline {
         FALLBACK_MIN_SCORE,
       );
       if (candidates.length === 0) {
-        return null; // minScore 未満で救済不能 → 呼び出し側がエラー文。
+        return { kind: 'unidentified' }; // minScore 未満で救済不能 → ERR_NO_LAW。
       }
       lawNums = dedupeStrings(candidates.map((c) => c.lawNum));
     } else {
-      // 通称→正式名称を解決してから施行令補完（通称のままだと最近傍が別法を誤マッチするため）。
-      const searchLawNames = expandLawNamesWithOrdinances(applyLawNameAliases(lawNames, this.aliases));
       lawNums = await this.deps.retriever.resolveLawNums(searchLawNames);
       if (lawNums.length === 0) {
         // 広めの再検索（移植元 broader search）。
@@ -248,13 +322,21 @@ export class LawReportPipeline {
         ]);
       }
     }
+    return { kind: 'current', lawNums };
+  }
 
+  /**
+   * 特定法令の内側で、クエリ近傍 top-K 条文へ事前圧縮する（タスク3＝gemma 選別を可能なタスク化）。
+   * includeFuture は as_of 指定時（版解決で時点解決する）と施行予定モード（未施行条文が答えそのもの）で true。
+   */
+  private async retrieveArticles(
+    query: string,
+    lawNums: string[],
+    includeFuture: boolean,
+  ): Promise<ArticleWithSummary[]> {
     if (lawNums.length === 0) {
-      return []; // 法令名は出たが特定不能 → ERR_NO_ARTICLES。
+      return [];
     }
-
-    // 事前ランク：特定法令の内側でクエリ近傍 top-K に圧縮してから選別へ。
-    // as_of 指定時は未施行条文も候補に含める（後段の版解決で時点解決する）。
     return this.deps.retriever.searchArticlesByContentInLaws(
       query,
       lawNums,
@@ -289,11 +371,43 @@ export class LawReportPipeline {
     // ② ローカル LLM 法令名推定。
     const lawNames = await this.deps.estimator.estimate(query, model, requestId);
 
-    // ③④ 施行令補完＋法令特定＋全条文取得（段2 空時はフォールバック）。as_of 時は未施行も候補に含める。
-    const articles0 = await this.retrieveArticles(query, lawNames, asOfMode);
-    if (articles0 === null) {
+    // ③ 施行令補完＋法令特定（3 値判定）。
+    const identification = await this.identifyLaws(query, lawNames, queryLawNames);
+    if (identification.kind === 'unidentified') {
       return { report: ERR_NO_LAW };
     }
+    if (identification.kind === 'none') {
+      // 【該当なし】＝条文を一切出さない。将来の緩和判断のため棄却候補を残す（設計 §4-2）。
+      logger.info(
+        {
+          requestId,
+          stage: identification.stage,
+          estimatedLawNames: lawNames,
+          rejected: identification.rejected.map((r) => r.lawTitle),
+        },
+        '法令RAG: 固有部分の一致する法令が無いため条文を提示しません（該当なし）',
+      );
+      return { report: ERR_NO_MATCH };
+    }
+    const pendingMode = identification.kind === 'pending';
+    if (pendingMode) {
+      logger.info(
+        {
+          requestId,
+          stage: identification.stage,
+          laws: identification.pending.map((p) => ({
+            lawTitle: p.lawTitle,
+            futureMainArticles: p.futureMainArticles,
+            earliestFutureEnforceDate: p.earliestFutureEnforceDate,
+          })),
+        },
+        '法令RAG: 本則が未施行の法令として回答します（施行予定）',
+      );
+    }
+
+    // ④ 特定法令の内側で事前ランク top-K。施行予定モードは未施行条文が答えそのものなので必ず含める。
+    const includeFuture = asOfMode || pendingMode;
+    const articles0 = await this.retrieveArticles(query, identification.lawNums, includeFuture);
     if (articles0.length === 0) {
       return { report: ERR_NO_ARTICLES };
     }
@@ -313,7 +427,7 @@ export class LawReportPipeline {
       return { report: ERR_NO_FULL_ARTICLES };
     }
 
-    const mentionedFull = await this.fetchMentionedFull(query, articles, asOfMode);
+    const mentionedFull = await this.fetchMentionedFull(query, articles, includeFuture);
     if (mentionedFull.length > 0) {
       const anchors = new Set(mentionedFull.map((a) => a.uniqueAnchor));
       finalArticles = [
@@ -322,7 +436,7 @@ export class LawReportPipeline {
       ];
     }
 
-    const summaryFull = await this.fetchSummaryOnlyFull(articles, asOfMode);
+    const summaryFull = await this.fetchSummaryOnlyFull(articles, includeFuture);
     if (summaryFull.length > 0) {
       const map = new Map(summaryFull.map((a) => [a.uniqueAnchor, a]));
       finalArticles = finalArticles.map((a) => map.get(a.uniqueAnchor) ?? a);
@@ -348,9 +462,13 @@ export class LawReportPipeline {
     if (substitutionWarning) {
       withWarnings = substitutionWarning + withWarnings;
     }
-    // as-of モードは参照時点の開示指示を最優先で前置（「どの版で答えたか」を黙らせない）。
+    // as-of モードは参照時点の開示指示を前置（「どの版で答えたか」を黙らせない）。
     if (asOf) {
       withWarnings = buildAsOfNotice(asOf) + withWarnings;
+    }
+    // 施行予定は最優先で前置する（条文の中身より先に「まだ施行されていない」を言わせる）。
+    if (identification.kind === 'pending') {
+      withWarnings = buildPendingEnforcementNotice(identification.pending) + withWarnings;
     }
 
     const report = await this.deps.generator.generate(query, withWarnings, model, requestId);

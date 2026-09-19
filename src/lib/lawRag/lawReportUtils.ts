@@ -109,6 +109,8 @@ export function toFullArticles(articles: ArticleWithSummary[]): FullArticle[] {
         uniqueAnchor: a.uniqueAnchor,
         anchor: null,
         url: egovUrl(a.lawId, null),
+        // 索引の未施行フラグを最終参照まで運ぶ（施行予定モードで「現行」バッジを出さないため）。
+        isFuture: a.isFuture ?? false,
       });
     }
   }
