@@ -8,6 +8,9 @@ import { KeycloakIdpClient } from '../lib/idp/keycloakIdpClient.js';
 import { EmbeddingAbstractionClient } from '../lib/llm/embeddingAbstractionClient.js';
 import { LlmAbstractionClient } from '../lib/llm/llmAbstractionClient.js';
 import { RerankAbstractionClient } from '../lib/llm/rerankAbstractionClient.js';
+import { loadJudgeConfig } from '../lib/judge/config.js';
+import { JudgeService } from '../lib/judge/judgeService.js';
+import { OllamaNativeClient } from '../lib/judge/ollamaNativeClient.js';
 import { loadRagConfig } from '../lib/rag/config.js';
 import { RagService } from '../lib/rag/ragService.js';
 import { ArticleSelector } from '../lib/lawRag/articleSelector.js';
@@ -38,6 +41,7 @@ import { createFilesRouter } from './files/index.js';
 import { createImageRouter } from './image/index.js';
 import { createInvokeHistoriesRouter } from './invokeHistories/index.js';
 import { createPredictRouter } from './predict/index.js';
+import { createJudgeRouter } from './judge/index.js';
 import { createLawRagRouter } from './lawRag/index.js';
 import { createRagRouter } from './rag/index.js';
 import { createSystemContextsRouter } from './systemContexts/index.js';
@@ -93,6 +97,19 @@ export function createApiRouterFromEnv(): Router {
     generator: new ReportGenerator(llm),
     retriever: new LawRetriever(new EmbeddingAbstractionClient()),
   });
+  // 判定（-onpre 新規・確率分布で答えを決める方式）。1 トークン目の logprobs を使うため、既存 LLM 抽象化レイヤー
+  // （OpenAI 互換・logprobs 非対応）ではなく Ollama ネイティブ /api/chat を直接叩く別経路。モデルは
+  // 既定チャットモデルと同一にして OLLAMA_MAX_LOADED_MODELS=1 でのモデル入れ替えを避ける
+  // （未設定なら judge ルートだけ 503＝他機能は壊さない）。
+  const judgeConfig = loadJudgeConfig();
+  const judge = new JudgeService(
+    new OllamaNativeClient({
+      baseUrl: judgeConfig.baseUrl,
+      attemptTimeoutMs: judgeConfig.attemptTimeoutMs,
+      maxRetryWaitMs: judgeConfig.maxRetryWaitMs,
+    }),
+    judgeConfig,
+  );
   const image = new SdcppImageClient();
   // Code Interpreter。コード生成は上の llm を流用、実行は NsJail サンドボックス（SandboxClient seam・
   // profile sandbox）へ委譲。SANDBOX_BASE_URL は使用時にのみ要求（未配線でも起動可）。
@@ -120,6 +137,9 @@ export function createApiRouterFromEnv(): Router {
   }
   router.use('/rag', requireUseCase(enabledUseCases, 'rag'));
   router.use('/law-rag', requireUseCase(enabledUseCases, 'rag'));
+  // 判定は ollama（profile llm）に依存するため、点灯条件が同じ 'generate' に相乗りする
+  // （新しいユースケースキーを足すと api/deploy/web の 3 リポで表を増やすことになるため）。
+  router.use('/judge', requireUseCase(enabledUseCases, 'generate'));
   router.use('/image', requireUseCase(enabledUseCases, 'image'));
   router.use('/transcribe', requireUseCase(enabledUseCases, 'transcribe'));
   // ExApp の非同期実行のみゲート（queue profile 依存）。一覧 GET /exapps・作成 POST /teams/:id/exapps は
@@ -142,6 +162,9 @@ export function createApiRouterFromEnv(): Router {
 
   // lawRag リソース群（法令名ベース忠実ポート＝推定→特定→選別→レポート→出典結合）。
   router.use(createLawRagRouter({ pipeline: lawReportPipeline }));
+
+  // judge リソース群（-onpre 新規、1 トークン目の確率分布による判定）。
+  router.use(createJudgeRouter({ judge }));
 
   // codeInterpreter リソース群（源内独自 IF・CSV/Excel→pandas→matplotlib を NsJail サンドボックスで実行）。
   router.use(createCodeInterpreterRouter({ llm, sandbox, config: codeInterpreterConfig }));

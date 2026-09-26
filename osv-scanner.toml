@@ -3,17 +3,27 @@
 # 理由（配信到達性・修正版の互換性）と再評価期日（ignoreUntil）を必ず併記する。
 # 直接修正できるものは overrides で fixed 版へ上げる方針（本ファイルには載せない）。
 
-# @hono/node-server: prisma@7.8.0（devDependency）の @prisma/dev 経由の推移依存。
-# ビルド時ツールチェーン専用で配信物（dist）には含まれない。修正版 2.0.5 はメジャー更新で
-# @prisma/dev（1.19.x を要求）を壊すため強制上書きしない。Prisma 側の更新での解消を待つ。
-[[IgnoredVulns]]
-id = "GHSA-frvp-7c67-39w9"
-ignoreUntil = 2026-09-30
-reason = "dev-only, prisma@7.8.0 build tooling via @prisma/dev; fix 2.0.5 is a major bump breaking @prisma/dev; not in runtime dist. Re-evaluate when prisma updates."
-
-# valibot: 同じく @prisma/dev 経由の推移依存で @prisma/dev が 1.2.0 に固定。1.4.2 への上書きは
-# @prisma/dev を壊しうる。ビルド時のみ・配信非到達。Prisma 側の更新での解消を待つ。
-[[IgnoredVulns]]
-id = "GHSA-5qjj-4xww-7phc"
-ignoreUntil = 2026-09-30
-reason = "dev-only, prisma@7.8.0 build tooling via @prisma/dev pinning valibot 1.2.0; not in runtime dist. Re-evaluate when prisma updates."
+# 現在、登録は 0 件である。
+#
+# 2026-09-23 に、残っていた 2 件を削除した（期限切れを待たず、上流で解消したため）:
+#   - GHSA-frvp-7c67-39w9（@hono/node-server）
+#   - GHSA-5qjj-4xww-7phc（valibot）
+# いずれも prisma@7.8.0 の @prisma/dev 経由の推移依存だった。prisma を 7.10.0 へ上げると
+# @prisma/dev が 0.24.3 → 0.24.17 になり、hono と @hono/node-server は依存ツリーから消滅し、
+# valibot は 1.2.0 → 1.4.2（修正版）になる。osv-scanner 自身が両 ID を `has unused ignores` と
+# 報告したため、延長ではなく登録ごと削除した。
+#
+# 同じ 2026-09-23 に、期限つきで登録していた 22 件も削除した。いずれも「修正版へ上げる作業は
+# 別に行う」ための一時的な登録で、実際に次のとおり上げた結果すべて解消し、登録は unused になった
+# （package-lock.json の解決版で確認済み）:
+#   - undici   7.28.0 → 7.29.1        （5 件・direct dependency）
+#   - qs       6.15.2 → 6.16.0        （2 件・override）
+#   - mysql2   3.15.3 → 3.23.1        （2 件・override）
+#   - fast-uri 3.1.4  → 3.1.8         （5 件・override）
+#   - deepmerge-ts 7.1.5 → 8.0.0      （1 件・override）
+#   - hono     4.12.27 → 依存ツリーから消滅（7 件。prisma 7.10.0 で @prisma/dev が hono を
+#     要求しなくなったため。overrides の "hono": "4.13.7" は再出現時の下限として残置）
+#
+# 上げ先は、スキャナが示す修正版と、こちらで確認した修正版のうち**高い方**を採る
+# （スキャナ側が低いことがあり、低い方へ上げると advisory は未解消のままスキャナだけ通る）。
+# 「安全に修正できないものだけを載せる」という本ファイルの方針どおり、解消済みの ID は残さない。
