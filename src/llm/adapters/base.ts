@@ -8,6 +8,11 @@ import type { ChatChunk, ChatInput, ChatOutput } from '../types.js';
  */
 export interface LLMAdapter {
   readonly backend: string;
+  /**
+   * 画像の ContentBlock を渡してよいか。**未指定は「渡してはいけない」**（既定は安全側）。
+   * 表明していない経路へ画像を渡すと黙って落ちるため、添付の層が `status="unsupported"` の注記へ振り替える。
+   */
+  readonly supportsImages?: boolean;
   chat(input: ChatInput): Promise<ChatOutput>;
   chatStream(input: ChatInput): AsyncIterable<ChatChunk>;
 }

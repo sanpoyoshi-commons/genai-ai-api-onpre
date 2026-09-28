@@ -1,8 +1,9 @@
 import type { LLMAdapter } from '../../llm/adapters/base.js';
 import { createLlmAdapter } from '../../llm/factory.js';
-import type { Message } from '../../llm/types.js';
+import type { ContentBlock, Message } from '../../llm/types.js';
 import { getRequestLogger } from '../../middleware/requestContext.js';
 import type { UnrecordedMessage } from '../../types/genaiWeb.js';
+import { hasAttachments, renderAttachmentsForMessages } from '../attachments/index.js';
 import { createByteFallbackDecoder, decodeByteFallback } from './byteFallback.js';
 import type { LlmClient, LlmGenerateInput } from './llmClient.js';
 
@@ -59,7 +60,7 @@ export class LlmAbstractionClient implements LlmClient {
     try {
       const output = await adapter.chat({
         model: input.model,
-        messages: toMessages(input.messages),
+        messages: await toMessages(input.messages, adapter.supportsImages === true),
         requestId: input.requestId,
         temperature: input.temperature ?? this.defaultTemperature,
       });
@@ -93,7 +94,7 @@ export class LlmAbstractionClient implements LlmClient {
     try {
       const stream = adapter.chatStream({
         model: input.model,
-        messages: toMessages(input.messages),
+        messages: await toMessages(input.messages, adapter.supportsImages === true),
         requestId: input.requestId,
         temperature: input.temperature ?? this.defaultTemperature,
       });
@@ -133,9 +134,40 @@ export class LlmAbstractionClient implements LlmClient {
   }
 }
 
-/** 上流 UnrecordedMessage[] → 抽象化レイヤーの Message[]（text 中心。extraData/llmType/trace は現状渡さない）。 */
-function toMessages(messages: UnrecordedMessage[]): Message[] {
-  return messages.map((m) => ({ role: m.role, content: m.content }));
+/**
+ * 上流 UnrecordedMessage[] → 抽象化レイヤーの Message[]（text 中心。llmType/trace は渡さない）。
+ *
+ * 添付（extraData）がある場合だけ、取り出した中身を `<documents>` ブロックにして本文の前に置く
+ * （src/lib/attachments）。**添付が無い呼び出し（predictTitle / RAG / Code Interpreter / 法令 RAG / 判定）は
+ * 従来と1バイトも変わらない**——下の早期 return がその保証で、回帰テストで固定している。
+ * 文字数の合計の上限は**リクエスト全体**で数えるため、メッセージを1つずつではなくまとめて渡す。
+ * 画像は経路が対応を表明しているとき（`LLMAdapter.supportsImages`）だけ image ブロックとして渡し、
+ * そうでなければ添付の層が注記へ振り替える（黙って落とさない）。
+ * ストリーミングでも最初の yield より前に解決するため、`predictStream` が 200 を書く前に済む。
+ */
+async function toMessages(messages: UnrecordedMessage[], imagesSupported: boolean): Promise<Message[]> {
+  if (!hasAttachments(messages)) {
+    return messages.map((m) => ({ role: m.role, content: m.content }));
+  }
+  const attachments = await renderAttachmentsForMessages(messages, undefined, { imagesSupported });
+  return messages.map((m, i) => {
+    const { documents = '', images = [] } = attachments[i] ?? {};
+    const text = documents ? `${documents}\n\n${m.content}` : m.content;
+    if (images.length === 0) {
+      // 画像が無ければ content は文字列のまま（アダプタの写像も従来どおりになる）。
+      return { role: m.role, content: text };
+    }
+    // 資料 → 画像 → 質問 の順に並べる（質問が末尾にある方が追従が安定する）。
+    const blocks: ContentBlock[] = [];
+    if (documents) {
+      blocks.push({ type: 'text', text: documents });
+    }
+    for (const image of images) {
+      blocks.push({ type: 'image', mediaType: image.mediaType, data: image.data });
+    }
+    blocks.push({ type: 'text', text: m.content });
+    return { role: m.role, content: blocks };
+  });
 }
 
 function contentToString(content: Message['content']): string {

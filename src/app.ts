@@ -41,9 +41,12 @@ export function createApp(options: AppOptions = {}): Express {
   );
 
   // 添付ファイルは base64 で predict ボディに inline されるため、Express 既定の 100kb では
-  // 数百 KB の文書でも 413(request entity too large) になる。上流互換（~4.5MB 添付）を満たす
-  // 既定 10mb とし、env で可変にする（大きな inline は別途モデルの context 制約に従う）。
-  app.use(express.json({ limit: process.env.API_JSON_BODY_LIMIT ?? '10mb' }));
+  // 数百 KB の文書でも 413(request entity too large) になる。
+  // 既定 48mb：web の上限（文書 5 件 × 4.5MB ＋ 画像 3 件 × 2MB ＝ 28.5MB）を base64 にすると
+  // 約 38MB になる。件数は文書と画像で別々に数えられるので、同時に目一杯載せられる。
+  // compose の既定（deploy）も 48mb で、ここは **compose を使わずに api を単体で起動したとき**にも
+  // 添付が通るようにするための同じ値。env で可変（大きな inline は別途モデルの文脈長に従う）。
+  app.use(express.json({ limit: process.env.API_JSON_BODY_LIMIT ?? '48mb' }));
 
   // health は認証外（docker compose up 起動確認・ヘルスチェック）。
   app.use(healthRouter);

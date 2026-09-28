@@ -11,10 +11,18 @@ import type { LLMError } from './errors.js';
 /** メッセージのロール（現状は system/user/assistant のみ実使用、tool は予約）。 */
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
-/** コンテンツブロック（現状は text のみ。multimodal は後続で union を拡張）。 */
-export type ContentBlock = { type: 'text'; text: string };
+/**
+ * コンテンツブロック（text と image。document/tool は未対応）。
+ *
+ * image は**アダプタが対応を表明している経路にだけ**渡す（`LLMAdapter.supportsImages`）。
+ * 表明していない経路へ画像が回ると黙って落ちるため、呼び出し側（添付の層）が注記へ振り替える。
+ */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  /** 画像。data は base64 本体（`data:` プレフィクスを含めない）。mediaType は `image/png` 等。 */
+  | { type: 'image'; mediaType: string; data: string };
 
-/** メッセージ。単純テキストは content:string、将来の multimodal 用に ContentBlock[] も許容。 */
+/** メッセージ。単純テキストは content:string、multimodal は ContentBlock[]。 */
 export type Message = {
   role: MessageRole;
   content: string | ContentBlock[];

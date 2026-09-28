@@ -32,7 +32,14 @@ FROM node:24.15.0-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a6
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# --omit=optional：runtime で使わない optional 依存を入れない。現状の対象は
+#   - @napi-rs/canvas（pdfjs-dist の optional。展開後 約34MB のネイティブ実装）
+#     → pdf.js が require するのは NodeCanvasFactory._createCanvas＝ページの描画時だけで、
+#       本リポは getTextContent()（文字の取り出し）しか使わないため不要。
+#   - pg-cloudflare（pg の optional。Cloudflare Workers 用のソケット実装で Node では使わない）
+# これで pdfjs-dist を足したことによるイメージの増分を 約69MB → 約35MB に抑える。
+# 将来 optional を実際に使う依存を足すときは、この行を見直すこと。
+RUN npm ci --omit=dev --omit=optional && npm cache clean --force
 COPY --from=build /app/dist ./dist
 USER node
 # 3000=HTTP（単体・後方互換）/ 3443=HTTPS（内部 TLS、deploy compose）

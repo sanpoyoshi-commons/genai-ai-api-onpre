@@ -146,3 +146,55 @@ test('chat: defaultMaxTokens なし＋未指定なら max_tokens は省略（oll
   await adapter.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(present, false);
 });
+
+// ── 画像 ────────────────────────────────────────────────────────────────────
+
+test('supportsImages を表明する（画像ブロックを渡してよい経路）', () => {
+  const adapter = adapterWith({ json: { choices: [{ message: { content: 'ok' } }] } });
+  assert.equal(adapter.supportsImages, true);
+});
+
+test('画像が無ければ content は従来どおり平文の string に畳む', async () => {
+  let body: Record<string, unknown> | undefined;
+  const adapter = adapterWith({
+    json: { choices: [{ message: { content: 'ok' } }] },
+    capture: (b) => {
+      body = b;
+    },
+  });
+  await adapter.chat({
+    model: 'm',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'あ' }] }],
+  });
+  const messages = body?.messages as { role: string; content: unknown }[];
+  assert.equal(messages[0]?.content, 'あ');
+});
+
+test('画像があれば parts の配列にし、base64 を data URI で image_url に載せる', async () => {
+  let body: Record<string, unknown> | undefined;
+  const adapter = adapterWith({
+    json: { choices: [{ message: { content: 'ok' } }] },
+    capture: (b) => {
+      body = b;
+    },
+  });
+  await adapter.chat({
+    model: 'm',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '資料' },
+          { type: 'image', mediaType: 'image/png', data: 'QUJD' },
+          { type: 'text', text: '質問' },
+        ],
+      },
+    ],
+  });
+  const messages = body?.messages as { role: string; content: unknown }[];
+  assert.deepEqual(messages[0]?.content, [
+    { type: 'text', text: '資料' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJD' } },
+    { type: 'text', text: '質問' },
+  ]);
+});

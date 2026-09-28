@@ -36,6 +36,9 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): LLMAdapte
 
   return {
     backend,
+    // Ollama の OpenAI 互換は vision に対応し、image_url に base64 の data URI を受ける（公式ドキュメント）。
+    // 直接 URL は不可。vLLM・OpenAI・Gemini・Anthropic の互換層も同じ形を受ける。
+    supportsImages: true,
     async chat(input: ChatInput): Promise<ChatOutput> {
       try {
         const res = await client.chat.completions.create({
@@ -114,10 +117,31 @@ function toOpenAIMessages(input: ChatInput): OpenAI.ChatCompletionMessageParam[]
     messages.push({ role: 'system', content: input.system });
   }
   for (const m of input.messages) {
-    // 現状は text のみ。role 'tool' は発生しない（型整合のためのキャスト）。
-    messages.push({ role: m.role, content: contentToText(m.content) } as OpenAI.ChatCompletionMessageParam);
+    // role 'tool' は発生しない（型整合のためのキャスト）。
+    messages.push({ role: m.role, content: toOpenAIContent(m.content) } as OpenAI.ChatCompletionMessageParam);
   }
   return messages;
+}
+
+/**
+ * ContentBlock[] → OpenAI の content。
+ *
+ * **画像が無ければ従来どおり平文の string に畳む**（text だけのときに配列へ変えると、互換レイヤーの
+ * 受け方が変わりうるため）。画像があるときだけ parts の配列にし、base64 を data URI にして
+ * `image_url` へ載せる（Ollama は直接 URL を受けず data URI のみ）。
+ */
+function toOpenAIContent(content: string | Message['content']): string | OpenAI.ChatCompletionContentPart[] {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!content.some((b) => b.type === 'image')) {
+    return contentToText(content);
+  }
+  return content.map((b) =>
+    b.type === 'image'
+      ? ({ type: 'image_url', image_url: { url: `data:${b.mediaType};base64,${b.data}` } } as const)
+      : ({ type: 'text', text: b.text } as const),
+  );
 }
 
 function contentToText(content: string | Message['content']): string {
