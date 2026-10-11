@@ -3,7 +3,14 @@
 # 理由（配信到達性・修正版の互換性）と再評価期日（ignoreUntil）を必ず併記する。
 # 直接修正できるものは overrides で fixed 版へ上げる方針（本ファイルには載せない）。
 
-# 現在、登録は 0 件である。
+# 現在の登録は 1 件（sprintf-js。2026-10-11 登録・ignoreUntil 2026-10-25）。内訳は本ファイル末尾の節。
+#
+# 2026-10-11 に 2 件を登録し、同日そのうち 1 件を削除した。
+# 登録したのは proxy-addr（GHSA-jqcg-44mw-7w3h）と sprintf-js（GHSA-hp3w-g68c-fv3c）で、
+# どちらも「該当するが監視のみ」と判定していたものである。proxy-addr は express 経由の推移依存で、
+# 修正版 2.0.8 が express の要求範囲 `^2.0.7` を満たすため package-lock.json の再解決だけで上がる。
+# 同日その作業を行って 2.0.7 → 2.0.8 とし、osv-scanner が当該 ID を `has unused ignores` と
+# 報告したため登録ごと削除した。sprintf-js は修正版が無いため登録を残している。
 #
 # 2026-09-23 に、残っていた 2 件を削除した（期限切れを待たず、上流で解消したため）:
 #   - GHSA-frvp-7c67-39w9（@hono/node-server）
@@ -27,3 +34,20 @@
 # 上げ先は、スキャナが示す修正版と、こちらで確認した修正版のうち**高い方**を採る
 # （スキャナ側が低いことがあり、低い方へ上げると advisory は未解消のままスキャナだけ通る）。
 # 「安全に修正できないものだけを載せる」という本ファイルの方針どおり、解消済みの ID は残さない。
+
+# ---------------------------------------------------------------------------
+# 2026-10-11 登録（1 件）。
+#
+# ignoreUntil は登録日 +2 週間。期限なしの登録はしない（恒久抑制になりガードレールが鳴らなくなる）。
+# パッケージ単位ではなく ID 単位で登録する。
+# ---------------------------------------------------------------------------
+
+# sprintf-js 1.0.3（mammoth 1.12.3 → argparse 1.0.10 経由の推移依存・prod）。CVE-2026-97058 ／
+# GHSA-hp3w-g68c-fv3c。上げ先なし（1.1.3 も affected のため、上げて消すことができない）。
+# mammoth の中で argparse を require しているのは CLI（bin/mammoth）だけで、本リポは mammoth を
+# ライブラリとして import するため（lib/index.js・src/lib/attachments/docxText.ts）、その経路は
+# 読み込まれない。
+[[IgnoredVulns]]
+id = "GHSA-hp3w-g68c-fv3c"
+ignoreUntil = 2026-10-25
+reason = "sprintf-js 1.0.3 (runtime, transitive via mammoth 1.12.3 -> argparse 1.0.10), CVE-2026-97058: in scope but monitoring-only. There is no upgrade target - 1.1.3 is affected as well - so the choice is this registration or dropping mammoth. The flaw is an unvalidated precision specifier passed to toFixed, raising an uncaught RangeError, so it needs a format string reached with attacker-influenced input. Within mammoth, argparse is required only from bin/mammoth (the CLI); this repo imports mammoth as a library (lib/index.js, from src/lib/attachments/docxText.ts), so neither the CLI entry nor sprintf-js's format path is ever loaded."

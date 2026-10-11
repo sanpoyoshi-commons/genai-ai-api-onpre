@@ -172,21 +172,64 @@ model TranscriptionJob {
   @@map("transcription_jobs")
 }
 
+// ナレッジ集（利用者が名前を付けて文書をまとめる単位）。所有権は owner_user_id（Keycloak sub）。
+// 同じ利用者の中で名前は一意（別の利用者が同じ名前を使うのは可）。
+// mcpEnabled は外部のエージェントへ検索を開くかどうかの印で、既定は false。読む側はまだ無い（列だけ用意する）。
+model RagCollection {
+  id          String   @id @map("id")
+  ownerUserId String   @map("owner_user_id")
+  name        String
+  description String?
+  mcpEnabled  Boolean  @default(false) @map("mcp_enabled")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  documents SourceDocument[]
+
+  @@unique([ownerUserId, name])
+  @@index([ownerUserId])
+  @@map("rag_collections")
+}
+
 // RAG 元文書テーブル（上流 AWS query-expansion-rag 経路に faithful＝chunk 本文全体 embedding）。
 // 元文書テーブル＋モデル別テーブルの 2 層構成。
 // 上流 lawsy の app_laws_master/app_laws_for_indexing 分離思想を一般文書 RAG に写像した 2 層の上層。
 // 所有権は owner_user_id（Keycloak sub）で持ち、検索を本人文書にスコープする。
+//
+// 保存は 3 層（原本／抽出テキスト／チャンクと埋め込み）に分け、どの層もひとつ上の層から作り直せるようにする。
+// 原本（bronzeKey 以下）＝オブジェクトストレージにそのまま置く。抽出テキスト（silverText 以下）＝この行。
+// チャンクと埋め込み＝RagChunk。どの処理で作ったかを層ごとに持つ（extractor/extractorVersion、
+// RagChunk の chunkerConfig/embeddingModel）。
+// 画面が無かった時期に API だけで入った文書は原本を持たないため、bronzeKey と silverText が空のまま残る。
 model SourceDocument {
-  id          String    @id @map("id")
-  ownerUserId String    @map("owner_user_id") // 起票 userId＝Keycloak sub（検索スコープ）
-  title       String // 元文書タイトル（参照表示用）
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  expireAt    DateTime? @map("expire_at") @db.Timestamptz(6)
+  id           String  @id @map("id")
+  ownerUserId  String  @map("owner_user_id") // 起票 userId＝Keycloak sub（検索スコープ）
+  collectionId String  @map("collection_id") // 所属するナレッジ集
+  title        String // 元文書タイトル（参照表示用）
+  // 原本（Bronze）。キーは所有者の sub を先頭に置く（authorizeOwnedKey と同じ規則）。
+  bronzeKey        String? @map("bronze_key")
+  sha256           String?
+  mime             String?
+  originalFilename String? @map("original_filename")
+  byteSize         Int?    @map("byte_size")
+  // 抽出テキスト（Silver）と、それを作った抽出器。
+  silverText       String? @map("silver_text")
+  extractor        String?
+  extractorVersion String? @map("extractor_version")
+  charCount        Int?    @map("char_count")
+  // 取り込みの結果。ready＝チャンクまで作れた／failed＝本文を取り出せなかった（原本は残す）。
+  status String  @default("ready")
+  error  String?
 
-  chunks RagChunk[]
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  expireAt  DateTime? @map("expire_at") @db.Timestamptz(6)
+
+  collection RagCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  chunks     RagChunk[]
 
   @@index([ownerUserId])
+  @@index([collectionId])
   @@index([expireAt])
   @@map("rag_source_documents")
 }
@@ -203,6 +246,9 @@ model RagChunk {
   chunkIndex  Int      @map("chunk_index") // 文書内の連番（0 起点）
   chunkText   String   @map("chunk_text") // チャンク本文（embedding 対象・pg_bigm 全文検索対象）
   headerPath  String?  @map("header_path") // C-4 の見出し階層（"H1 > H2" 等・参照表示用）
+  // どの切り方・どの埋め込みモデルで作った行かを残す（抽出テキストから作り直すときの手掛かり）。
+  chunkerConfig  Json?   @map("chunker_config")
+  embeddingModel String? @map("embedding_model")
   // embedding vector(768) は migration で追加（Unsupported＝Prisma Client は触らない／raw SQL 専用）。
   embedding   Unsupported("vector(768)")?
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)

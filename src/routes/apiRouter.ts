@@ -9,6 +9,7 @@ import { EmbeddingAbstractionClient } from '../lib/llm/embeddingAbstractionClien
 import { LlmAbstractionClient } from '../lib/llm/llmAbstractionClient.js';
 import { RerankAbstractionClient } from '../lib/llm/rerankAbstractionClient.js';
 import { loadJudgeConfig } from '../lib/judge/config.js';
+import { loadKnowledgeLimits } from '../lib/knowledge/config.js';
 import { JudgeService } from '../lib/judge/judgeService.js';
 import { OllamaNativeClient } from '../lib/judge/ollamaNativeClient.js';
 import { loadRagConfig } from '../lib/rag/config.js';
@@ -82,9 +83,11 @@ export function createApiRouterFromEnv(): Router {
   // pgvector + pg_bigm + RRF（RagRepository raw SQL）、回答生成は上の llm を流用（retrieve-and-generate）。
   // rerank は TEI ネイティブ /rerank（RerankClient seam）。常に注入し、有効化は
   // RERANK_ENABLED（loadRagConfig が読む・既定 false）でゲート。無効/未起動/失敗時は RRF 順にフォールバック。
+  // ナレッジ集と文書の出し入れ（所有の確認・原本のキー）は同じリポジトリが担う。
+  const ragRepository = new RagRepository();
   const rag = new RagService({
     embedding: new EmbeddingAbstractionClient(),
-    repo: new RagRepository(),
+    repo: ragRepository,
     config: loadRagConfig(),
     rerank: new RerankAbstractionClient(),
   });
@@ -157,8 +160,17 @@ export function createApiRouterFromEnv(): Router {
   // predict リソース群（predictStream 含む、LLM seam）。
   router.use(createPredictRouter({ llm, chats }));
 
-  // rag リソース群（-onpre 新規、ハイブリッド検索＋retrieve-and-generate）。
-  router.use(createRagRouter({ rag, llm }));
+  // rag リソース群（-onpre 新規、ナレッジ集＋検索だけ＋retrieve-and-generate）。原本は専用バケット。
+  router.use(
+    createRagRouter({
+      rag,
+      llm,
+      knowledge: ragRepository,
+      storage,
+      buckets,
+      limits: loadKnowledgeLimits(),
+    }),
+  );
 
   // lawRag リソース群（法令名ベース忠実ポート＝推定→特定→選別→レポート→出典結合）。
   router.use(createLawRagRouter({ pipeline: lawReportPipeline }));

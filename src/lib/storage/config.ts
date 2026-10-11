@@ -9,6 +9,11 @@ export interface StorageBuckets {
   audioBucket?: string;
   /** ExApp アーティファクト（getArtifactFile #44）。 */
   artifactsBucket?: string;
+  /**
+   * ナレッジ集の原本（投入された原本をそのまま置く層）。チャットの添付（fileBucket）とは寿命と削除の
+   * 規則が違うので別のバケットにする（添付は会話ごと、ナレッジ集は利用者が消すまで残る）。
+   */
+  knowledgeBucket?: string;
 }
 
 export function loadStorageBuckets(): StorageBuckets {
@@ -16,5 +21,6 @@ export function loadStorageBuckets(): StorageBuckets {
     fileBucket: process.env.FILE_BUCKET_NAME,
     audioBucket: process.env.AUDIO_BUCKET_NAME,
     artifactsBucket: process.env.ARTIFACTS_BUCKET_NAME,
+    knowledgeBucket: process.env.KNOWLEDGE_BUCKET_NAME,
   };
 }

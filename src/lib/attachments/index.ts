@@ -4,13 +4,8 @@ import type { ExtraData, UnrecordedMessage } from '../../types/genaiWeb.js';
 import { LruCache } from './cache.js';
 import { type AttachmentLimits, loadAttachmentLimits } from './config.js';
 import { buildDocumentsBlock, cutChars, type DocumentEntry } from './documents.js';
-import { extractDocxText } from './docxText.js';
-import { extractHtmlText } from './htmlText.js';
+import { detectKind, extractTextFromBytes, type TextExtraction } from './extractText.js';
 import { formatOfMediaType, isWithinImageLimits, MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE, sniffImage } from './imageSniff.js';
-import { extractXlsxText } from './xlsxText.js';
-import { checkZip } from './zipGuard.js';
-import { extractPdfText, PdfTimeoutError } from './pdfText.js';
-import { decodeText } from './textDecode.js';
 
 /**
  * 添付（extraData）の中身をモデルへ渡せる文字列にする層。
@@ -22,63 +17,17 @@ import { decodeText } from './textDecode.js';
  * 取り出しの失敗は例外にせず注記へ変える＝推論そのものは通す。
  */
 
-type Kind = 'pdf' | 'text' | 'html' | 'docx' | 'xlsx' | 'image' | 'unsupported';
-
-const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'csv']);
-const TEXT_MEDIA_TYPES = new Set(['text/plain', 'text/markdown', 'text/x-markdown', 'text/csv', 'application/csv']);
-const HTML_EXTENSIONS = new Set(['html', 'htm']);
-const HTML_MEDIA_TYPES = new Set(['text/html', 'application/xhtml+xml']);
-const DOCX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-/**
- * 画像として扱う名乗り。**渡してよいのは PNG と JPEG だけ**だが、webp・gif も「画像」として拾って
- * `unsupported` の注記にする（黙って落とさないため。実際に渡すかは imageSniff が中身で決める）。
- */
-const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']);
-
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
-}
-
-function detectKind(name: string, mediaType: string): Kind {
-  const ext = extensionOf(name);
-  const media = (mediaType.split(';')[0] ?? '').trim().toLowerCase();
-  if (ext === 'pdf' || media === 'application/pdf') {
-    return 'pdf';
-  }
-  if (ext === 'docx' || media === DOCX_MEDIA_TYPE) {
-    return 'docx';
-  }
-  if (ext === 'xlsx' || media === XLSX_MEDIA_TYPE) {
-    return 'xlsx';
-  }
-  if (HTML_EXTENSIONS.has(ext) || HTML_MEDIA_TYPES.has(media)) {
-    return 'html';
-  }
-  if (IMAGE_MEDIA_TYPES.has(media)) {
-    return 'image';
-  }
-  if (TEXT_EXTENSIONS.has(ext) || TEXT_MEDIA_TYPES.has(media)) {
-    return 'text';
-  }
-  return 'unsupported';
-}
-
 /** base64 の実バイト数の見積もり（復号せずに大きさを弾くため）。 */
 function estimateBytes(base64: string): number {
   const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
-/** 取り出しの結果（text のものだけメモ化の対象）。 */
-interface Extraction {
-  text: string;
-  pages?: number;
-  extractedPages?: number;
-  truncated?: boolean;
-  status?: string;
-  note?: string;
+/**
+ * 取り出しの結果（text のものだけメモ化の対象）。本文の取り出しそのものは `extractText.ts` と共用し、
+ * 添付の経路だけに要る「モデルへ画像として渡す実体」をここで足す。
+ */
+interface Extraction extends TextExtraction {
   /** status==='image' のときだけ。モデルへ画像ブロックとして渡す実体（メモ化しない）。 */
   image?: ImageAttachment;
 }
@@ -203,58 +152,16 @@ async function extract(extra: ExtraData, l: AttachmentLimits, deps: AttachmentDe
     };
   }
 
-  // docx・xlsx は zip。解析へ渡す前に、宣言された展開後サイズとエントリ数で弾く（zip 爆弾）。
-  if (kind === 'docx' || kind === 'xlsx') {
-    const verdict = checkZip(bytes);
-    if (!verdict.ok) {
-      return verdict.reason === 'too_large'
-        ? { text: '', status: 'too_large', note: '展開すると大きすぎるため解析しませんでした。' }
-        : { text: '', status: 'error', note: 'ファイルの形が壊れているため読み取れませんでした。' };
-    }
-  }
+  const result = await extractTextFromBytes(
+    bytes,
+    kind,
+    { maxPages: l.maxPages, maxChars: l.maxChars, parseTimeoutMs: l.parseTimeoutMs },
+    { now: deps.now },
+  );
 
-  let result: Extraction;
-  try {
-    if (kind === 'pdf') {
-      const pdf = await extractPdfText(bytes, {
-        maxPages: l.maxPages,
-        maxChars: l.maxChars,
-        timeoutMs: l.parseTimeoutMs,
-        now: deps.now,
-      });
-      result = {
-        text: pdf.text,
-        pages: pdf.pages,
-        extractedPages: pdf.extractedPages,
-        truncated: pdf.truncated,
-      };
-    } else if (kind === 'html') {
-      result = { text: extractHtmlText(bytes) };
-    } else if (kind === 'docx') {
-      result = { text: await extractDocxText(bytes) };
-    } else if (kind === 'xlsx') {
-      result = { text: await extractXlsxText(bytes, { maxChars: l.maxChars }) };
-    } else {
-      result = { text: decodeText(bytes) };
-    }
-  } catch (err) {
-    if (err instanceof PdfTimeoutError) {
-      // 時間切れはその時々で変わるのでメモ化しない（次のターンで通るかもしれない）。
-      return { text: '', status: 'timeout', note: '解析に時間がかかりすぎたため打ち切りました。' };
-    }
-    return {
-      text: '',
-      status: 'error',
-      note: '壊れているか、パスワードが掛かっているため読み取れませんでした。',
-    };
-  }
-
-  if (result.text.trim().length === 0) {
-    result = {
-      ...result,
-      status: 'no_text',
-      note: '文字を取り出せませんでした（画像だけのファイルかもしれません）。',
-    };
+  // 時間切れはその時々で変わるのでメモ化しない（次のターンで通るかもしれない）。
+  if (result.status === 'timeout') {
+    return result;
   }
 
   cache.set(key, result);
