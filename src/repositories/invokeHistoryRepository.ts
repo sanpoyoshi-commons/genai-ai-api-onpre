@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getPrisma } from '../lib/db.js';
 import type { FileStorage } from '../lib/storage/fileStorage.js';
+import { getRequestLogger } from '../middleware/requestContext.js';
 import { Prisma, type PrismaClient } from '../generated/prisma/client.js';
 
 /**
@@ -12,6 +13,10 @@ import { Prisma, type PrismaClient } from '../generated/prisma/client.js';
  * 入力（inputs）退避：base64 ファイル等で巨大化しうる inputs は、閾値超で SeaweedFS へ退避し DB 行には
  * マーカ参照（{ __inputsRef: "s3://..." }）のみ残す（行肥大の抑止。出力 artifacts 退避と対称）。読取系
  * （findExecution / findByKey / listByScope）で透過的に復元する。storage 未注入時は退避せず素通し（後方互換）。
+ *
+ * 復元の範囲：閾値以下の inputs は利用者が送った値がそのまま DB に入るため、退避マーカの形をした値も保存され
+ * うる。復元はその履歴行自身の退避先（退避バケット＋その行の team / exApp / user で作ったキー）に限り、
+ * それ以外を指すマーカは引きに行かず保存された値をそのまま返す（他者のオブジェクトの読み出しを防ぐ）。
  */
 
 /** inputs を退避する閾値（バイト）。これを超える inputs はストレージへ退避する。 */
@@ -26,6 +31,12 @@ function isOffloadedInputsRef(v: unknown): v is OffloadedInputsRef {
   return typeof v === 'object' && v !== null && typeof (v as OffloadedInputsRef).__inputsRef === 'string';
 }
 
+/**
+ * サーバが作る退避キーのファイル名（UUID ＋ .json、maybeOffloadInputs と対応）。区切りや上位参照を
+ * 含まない形に限るため、持ち主の接頭辞で始まるだけの崩れたキー（`..` 等）は一致しない。
+ */
+const OFFLOADED_INPUTS_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+
 /** s3://bucket/key を bucket / key に分解する。不正は null。 */
 function parseStorageUrl(url: string): { bucket: string; key: string } | null {
   const m = /^s3:\/\/(?<bucket>[^/]+)\/(?<key>.+)$/.exec(url);
@@ -39,6 +50,9 @@ export interface HistoryKey {
   userId: string;
   createdDate: Date;
 }
+
+/** 退避キーに現れる持ち主（履歴行の複合キーのうち createdDate 以外）。復元の照合に用いる。 */
+type InputsOwner = Pick<HistoryKey, 'teamId' | 'exAppId' | 'userId'>;
 
 export interface CreateHistoryInput {
   teamId: string;
@@ -130,13 +144,35 @@ export class InvokeHistoryRepository {
     return { __inputsRef: `s3://${this.inputsBucket}/${key}` } satisfies OffloadedInputsRef;
   }
 
-  /** 退避マーカなら復元、そうでなければ素通し。storage 未注入で復元不能なら（防御的に）マーカのまま返す。 */
-  private async rehydrateInputs(inputs: unknown): Promise<unknown> {
+  /** 退避マーカが、その履歴行自身の退避先（maybeOffloadInputs が作る bucket / key）を指すか。 */
+  private pointsAtOwnOffload(parsed: { bucket: string; key: string }, owner: InputsOwner): boolean {
+    if (!this.inputsBucket || parsed.bucket !== this.inputsBucket) {
+      return false;
+    }
+    const prefix = `inputs/${owner.teamId}/${owner.exAppId}/${owner.userId}/`;
+    return parsed.key.startsWith(prefix) && OFFLOADED_INPUTS_FILE_NAME.test(parsed.key.slice(prefix.length));
+  }
+
+  /**
+   * 退避マーカなら復元、そうでなければ素通し。復元はその行自身の退避先を指すマーカだけに限る（他者の
+   * オブジェクトを読まないため）。storage 未注入・不正 URL・他の退避先を指す場合は、保存された値を
+   * そのまま返す（利用者自身が送った値なので、他者のデータは出ない）。
+   */
+  private async rehydrateInputs(inputs: unknown, owner: InputsOwner): Promise<unknown> {
     if (!isOffloadedInputsRef(inputs) || !this.storage) {
       return inputs;
     }
     const parsed = parseStorageUrl(inputs.__inputsRef);
-    if (!parsed) {
+    if (!parsed || !this.pointsAtOwnOffload(parsed, owner)) {
+      getRequestLogger().warn(
+        {
+          component: 'api.exapp.history',
+          event: 'inputs_ref_not_restored',
+          team_id: owner.teamId,
+          ex_app_id: owner.exAppId,
+        },
+        'stored inputs marker does not point at the history own offload key; returning the stored value as is',
+      );
       return inputs;
     }
     const bytes = await this.storage.getObject(parsed.bucket, parsed.key);
@@ -155,7 +191,7 @@ export class InvokeHistoryRepository {
     if (!row) {
       return null;
     }
-    return { ...row, inputs: await this.rehydrateInputs(row.inputs) };
+    return { ...row, inputs: await this.rehydrateInputs(row.inputs, key) };
   }
 
   /** 非同期 ExApp の外部状態（status_url／request_id）を永続化する（初回 POST で 202 受領時）。 */
@@ -204,7 +240,7 @@ export class InvokeHistoryRepository {
     if (!row) {
       return null;
     }
-    return { ...row, inputs: await this.rehydrateInputs(row.inputs) };
+    return { ...row, inputs: await this.rehydrateInputs(row.inputs, row) };
   }
 
   /**
@@ -238,7 +274,7 @@ export class InvokeHistoryRepository {
     });
     const hasMore = rows.length > HISTORY_PAGE_SIZE;
     const page = hasMore ? rows.slice(0, HISTORY_PAGE_SIZE) : rows;
-    const data = await Promise.all(page.map(async (r) => ({ ...r, inputs: await this.rehydrateInputs(r.inputs) })));
+    const data = await Promise.all(page.map(async (r) => ({ ...r, inputs: await this.rehydrateInputs(r.inputs, r) })));
     const last = data[data.length - 1];
     const nextCursor = hasMore && last ? String(last.createdDate.getTime()) : undefined;
     return { data, nextCursor };
