@@ -3,8 +3,10 @@
 # 理由（配信到達性・修正版の互換性）と再評価期日（ignoreUntil）を必ず併記する。
 # 直接修正できるものは overrides で fixed 版へ上げる方針（本ファイルには載せない）。
 
-# 現在の登録は 1 件（sprintf-js。2026-10-11 登録・2026-10-19 再登録・ignoreUntil 2026-11-02）。
+# 現在の登録は 5 件（body-parser 1 件・fast-uri 4 件。2026-10-24 登録・ignoreUntil 2026-11-07）。
 # 内訳は本ファイル末尾の節。
+# 2026-10-24 に sprintf-js の 1 件（GHSA-hp3w-g68c-fv3c）を削除した。advisory が 2026-10-22 に撤回され
+# （理由は「例外を扱うのはアプリケーションの責任」）、osv-scanner が `has unused ignores` と報告したため。
 #
 # 2026-10-19 に sprintf-js の 1 件を再登録した（ignoreUntil 2026-10-25 → 2026-11-02）。延長ではなく
 # 期限前の再判定で、判定は「該当するが監視のみ」のまま変わらない。確かめたこと:
@@ -45,18 +47,39 @@
 # 「安全に修正できないものだけを載せる」という本ファイルの方針どおり、解消済みの ID は残さない。
 
 # ---------------------------------------------------------------------------
-# 2026-10-11 登録（1 件）。
-#
-# ignoreUntil は登録日 +2 週間。期限なしの登録はしない（恒久抑制になりガードレールが鳴らなくなる）。
-# パッケージ単位ではなく ID 単位で登録する。
+# 2026-10-24 登録（5 件）。修正版がクールダウン（min-release-age=7）の中にあるための一時的な登録。
+# ignoreUntil は登録日 +2 週間。上げた PR で登録ごと消す
+# （fast-uri は 2026-10-27 08:05 JST 以降、body-parser は 2026-10-29 20:39 JST 以降）。
 # ---------------------------------------------------------------------------
 
-# sprintf-js 1.0.3（mammoth 1.12.3 → argparse 1.0.10 経由の推移依存・prod）。CVE-2026-97058 ／
-# GHSA-hp3w-g68c-fv3c。上げ先なし（1.1.3 も affected のため、上げて消すことができない）。
-# mammoth の中で argparse を require しているのは CLI（bin/mammoth）だけで、本リポは mammoth を
-# ライブラリとして import するため（lib/index.js・src/lib/attachments/docxText.ts）、その経路は
-# 読み込まれない。
+# body-parser 2.3.0（express 5.2.1 経由の推移依存・prod・overrides で固定）。CVE-2026-111181 ／
+# GHSA-27r3-jxmh-p828。修正版 2.4.0 は 2026-10-22T11:39:38Z の公開で、クールダウンの中にある。
+# src/app.ts の express.json に inflate: false（勧告に書かれた回避策）を入れたので、
+# 符号化された要求の本文は、展開ストリームを作る前に拒まれる。
 [[IgnoredVulns]]
-id = "GHSA-hp3w-g68c-fv3c"
-ignoreUntil = 2026-11-02
-reason = "sprintf-js 1.0.3 (runtime, transitive via mammoth 1.12.3 -> argparse 1.0.10), CVE-2026-97058: in scope but monitoring-only. There is no upgrade target - 1.1.3 is affected as well - so the choice is this registration or dropping mammoth. The flaw is an unvalidated precision specifier passed to toFixed, raising an uncaught RangeError, so it needs a format string reached with attacker-influenced input. Within mammoth, argparse is required only from bin/mammoth (the CLI); this repo imports mammoth as a library (lib/index.js, from src/lib/attachments/docxText.ts), so neither the CLI entry nor sprintf-js's format path is ever loaded."
+id = "GHSA-27r3-jxmh-p828"
+ignoreUntil = 2026-11-07
+reason = "body-parser 2.3.0 (runtime, transitive via express 5.2.1, pinned by overrides), CVE-2026-111181: in scope, mitigated. The fix 2.4.0 was published 2026-10-22T11:39:38Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-29T11:39:38Z. src/app.ts now passes inflate: false to express.json, the workaround the advisory documents, so a request with a Content-Encoding is rejected before any decompression stream is created. Remove this entry when the override moves to 2.4.0. Checked on 2026-10-24."
+
+# fast-uri 3.1.8（@prisma/dev → @prisma/streams-local → ajv 8.20.0 経由・lock では devOptional）。
+# 4 件とも修正版は 3.1.9 で、2026-10-19T23:05:26Z の公開でクールダウンの中にある。
+# runtime のイメージは npm ci --omit=dev --omit=optional で作るので、fast-uri は入らない。
+[[IgnoredVulns]]
+id = "GHSA-333x-w4r6-6crp"
+ignoreUntil = 2026-11-07
+reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
+
+[[IgnoredVulns]]
+id = "GHSA-w74x-v6f9-j3xg"
+ignoreUntil = 2026-11-07
+reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
+
+[[IgnoredVulns]]
+id = "GHSA-wjr9-j795-jxcr"
+ignoreUntil = 2026-11-07
+reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
+
+[[IgnoredVulns]]
+id = "GHSA-xhq7-xmqj-769h"
+ignoreUntil = 2026-11-07
+reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."

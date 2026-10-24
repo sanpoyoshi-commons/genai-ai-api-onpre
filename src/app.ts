@@ -46,7 +46,10 @@ export function createApp(options: AppOptions = {}): Express {
   // 約 38MB になる。件数は文書と画像で別々に数えられるので、同時に目一杯載せられる。
   // compose の既定（deploy）も 48mb で、ここは **compose を使わずに api を単体で起動したとき**にも
   // 添付が通るようにするための同じ値。env で可変（大きな inline は別途モデルの文脈長に従う）。
-  app.use(express.json({ limit: process.env.API_JSON_BODY_LIMIT ?? '48mb' }));
+  // inflate: false は GHSA-27r3-jxmh-p828（body-parser の圧縮本文の扱い）の回避策。api は
+  // 圧縮した要求の本文を受けないので、Content-Encoding 付きの本文は展開せずに拒む。
+  // body-parser 2.4.0 へ上げた後もこれを残すかは、その時に別に決める。
+  app.use(express.json({ limit: process.env.API_JSON_BODY_LIMIT ?? '48mb', inflate: false }));
 
   // health は認証外（docker compose up 起動確認・ヘルスチェック）。
   app.use(healthRouter);
