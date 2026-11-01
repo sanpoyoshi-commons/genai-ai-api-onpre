@@ -3,8 +3,12 @@
 # 理由（配信到達性・修正版の互換性）と再評価期日（ignoreUntil）を必ず併記する。
 # 直接修正できるものは overrides で fixed 版へ上げる方針（本ファイルには載せない）。
 
-# 現在の登録は 5 件（body-parser 1 件・fast-uri 4 件。2026-10-24 登録・ignoreUntil 2026-11-07）。
-# 内訳は本ファイル末尾の節。
+# 現在の登録は 0 件。
+#
+# 2026-10-30 に 2026-10-24 登録の 5 件（body-parser 1 件・fast-uri 4 件）を削除した。クールダウンが
+# 満ちたので overrides を 2.4.0 ／ 3.1.9 へ上げ、qs も 6.16.1 にした。osv-scanner が全件を
+# `has unused ignores` と報告する状態になるため、延長ではなく登録ごと削除した。
+#
 # 2026-10-24 に sprintf-js の 1 件（GHSA-hp3w-g68c-fv3c）を削除した。advisory が 2026-10-22 に撤回され
 # （理由は「例外を扱うのはアプリケーションの責任」）、osv-scanner が `has unused ignores` と報告したため。
 #
@@ -45,41 +49,3 @@
 # 上げ先は、スキャナが示す修正版と、こちらで確認した修正版のうち**高い方**を採る
 # （スキャナ側が低いことがあり、低い方へ上げると advisory は未解消のままスキャナだけ通る）。
 # 「安全に修正できないものだけを載せる」という本ファイルの方針どおり、解消済みの ID は残さない。
-
-# ---------------------------------------------------------------------------
-# 2026-10-24 登録（5 件）。修正版がクールダウン（min-release-age=7）の中にあるための一時的な登録。
-# ignoreUntil は登録日 +2 週間。上げた PR で登録ごと消す
-# （fast-uri は 2026-10-27 08:05 JST 以降、body-parser は 2026-10-29 20:39 JST 以降）。
-# ---------------------------------------------------------------------------
-
-# body-parser 2.3.0（express 5.2.1 経由の推移依存・prod・overrides で固定）。CVE-2026-111181 ／
-# GHSA-27r3-jxmh-p828。修正版 2.4.0 は 2026-10-22T11:39:38Z の公開で、クールダウンの中にある。
-# src/app.ts の express.json に inflate: false（勧告に書かれた回避策）を入れたので、
-# 符号化された要求の本文は、展開ストリームを作る前に拒まれる。
-[[IgnoredVulns]]
-id = "GHSA-27r3-jxmh-p828"
-ignoreUntil = 2026-11-07
-reason = "body-parser 2.3.0 (runtime, transitive via express 5.2.1, pinned by overrides), CVE-2026-111181: in scope, mitigated. The fix 2.4.0 was published 2026-10-22T11:39:38Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-29T11:39:38Z. src/app.ts now passes inflate: false to express.json, the workaround the advisory documents, so a request with a Content-Encoding is rejected before any decompression stream is created. Remove this entry when the override moves to 2.4.0. Checked on 2026-10-24."
-
-# fast-uri 3.1.8（@prisma/dev → @prisma/streams-local → ajv 8.20.0 経由・lock では devOptional）。
-# 4 件とも修正版は 3.1.9 で、2026-10-19T23:05:26Z の公開でクールダウンの中にある。
-# runtime のイメージは npm ci --omit=dev --omit=optional で作るので、fast-uri は入らない。
-[[IgnoredVulns]]
-id = "GHSA-333x-w4r6-6crp"
-ignoreUntil = 2026-11-07
-reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
-
-[[IgnoredVulns]]
-id = "GHSA-w74x-v6f9-j3xg"
-ignoreUntil = 2026-11-07
-reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
-
-[[IgnoredVulns]]
-id = "GHSA-wjr9-j795-jxcr"
-ignoreUntil = 2026-11-07
-reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."
-
-[[IgnoredVulns]]
-id = "GHSA-xhq7-xmqj-769h"
-ignoreUntil = 2026-11-07
-reason = "fast-uri 3.1.8 (devOptional: @prisma/dev -> @prisma/streams-local -> ajv 8.20.0 -> fast-uri), not installed in the runtime image, which is built with npm ci --omit=dev --omit=optional. The fix 3.1.9 was published 2026-10-19T23:05:26Z and is still inside the 7-day cooldown (min-release-age=7) until 2026-10-26T23:05:26Z. Remove this entry when the override moves to 3.1.9. Checked on 2026-10-24."

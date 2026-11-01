@@ -26,12 +26,19 @@
 --   - 上流ステップ3（CREATE VECTOR INDEX / IVF）は後段（HNSW 仮置き・ivfflat はベンチ後）。
 
 -- ステップ1: 法令マスタ app_laws_master（law_num ごと最新版の法令名）。
+--   同じ law_num に条のある法令と条の無い法令が並ぶときは、条のある法令の題名を採る
+--   （その題名の行に本則の条 Main_Article_% があるものを先に並べる）。
 TRUNCATE app_laws_master;
 INSERT INTO app_laws_master (law_num, law_title, promulgate_date)
-SELECT DISTINCT ON (law_num)
-  law_num, law_title, promulgate_date
-FROM dwh_laws
-ORDER BY law_num, promulgate_date DESC NULLS LAST, load_timestamp DESC, law_title;
+SELECT DISTINCT ON (d.law_num)
+  d.law_num, d.law_title, d.promulgate_date
+FROM dwh_laws d
+JOIN (
+  SELECT law_num, law_title, bool_or(unique_anchor LIKE 'Main_Article_%') AS has_article
+  FROM dwh_laws
+  GROUP BY law_num, law_title
+) f USING (law_num, law_title)
+ORDER BY d.law_num, f.has_article DESC, d.promulgate_date DESC NULLS LAST, d.load_timestamp DESC, d.law_title;
 -- law_title_embedding は NULL のまま（後段で生成）。
 
 -- ステップ2: 条文インデックス app_laws_for_indexing（現行施行版＝is_future=false／将来のみ新設＝is_future=true）。
@@ -70,6 +77,12 @@ WHERE rn = 1
   -- 削除 stub（本文が「削除」だけの範囲/単条削除条文）は検索ノイズなので App 層に入れない（所見 B・
   -- 防御的二重化＝取り込み側 xml_to_jsonl.is_deletion_stub と同条件）。先頭（タイトル）行を除いた本文を
   -- trim して「削除」だけの行を除外。本文に「削除」を含むだけの正当条文は全体一致しないため保持される。
-  AND btrim(regexp_replace(content, '^[^' || E'\n' || ']*' || E'\n', ''), E' 　\n\t') <> '削除';
+  AND btrim(regexp_replace(content, '^[^' || E'\n' || ']*' || E'\n', ''), E' 　\n\t') <> '削除'
+  -- 条の無い本則（Main_Provision）で、先頭（「本則」）行を除いた本文が空白だけのものは App 層に入れない
+  -- （防御的二重化＝取り込み側 xml_to_jsonl の空の本文の除外と同条件）。条の行には当てない。
+  AND NOT (
+    unique_anchor = 'Main_Provision'
+    AND btrim(regexp_replace(content, '^[^' || E'\n' || ']*' || E'\n', ''), E' 　\n\t') = ''
+  );
 -- content_embedding は NULL のまま（後段で生成）。is_future の付与で既定モード（WHERE is_future=false）は
 -- as-of 導入前と同一の現行版集合になる（後方互換）。

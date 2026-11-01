@@ -413,9 +413,13 @@ python3 law_rag_eval.py --eval-file <law-queries.json> --candidates 100 # 候補
 
 - パーサは標準ライブラリ `xml.etree.ElementTree`。外部ライブラリ（`ja-law-parser` 等）は使わない。
 - チャンク単位は **条（Article）**。`unique_anchor = "{Main|Suppl}_Article_{Num}"`。
+- **条の無い本則**（`MainProvision` の直下が項 `Paragraph` だけ）は、直下の項をまとめて 1 チャンクにする。
+  `unique_anchor = "Main_Provision"`、`anchor` は `null`、`article_summary` は「本則」。`content` は
+  先頭行が「本則」で、項は条と同じく 1 段下げる。先頭行を除いた本文が空白だけの版はチャンクにしない
+  （`sql/02_rebuild_app_layer.sql` でも同じ条件で除外）。原始附則は従来どおり条だけを取り込む。
 - **本則（MainProvision）＋原始附則**のみ取り込む。**廃止条文（`Delete="true"`）と改正附則
   （`AmendLawNum` 属性付き `SupplProvision`）は除外**。
-- e-Gov リンク用アンカーは本則のみ（`Mp-At_{Num}`）。附則は `null`。
+- e-Gov リンク用アンカーは本則の条のみ（`Mp-At_{Num}`）。附則と `Main_Provision` は `null`。
 - `content` は条の階層（Paragraph / Item / Subitem…）を全角スペースインデントで平坦化。
 - 元号→西暦変換（Meiji=1867 / Taisho=1911 / Showa=1925 / Heisei=1988 / Reiwa=2018 + 年）。
 

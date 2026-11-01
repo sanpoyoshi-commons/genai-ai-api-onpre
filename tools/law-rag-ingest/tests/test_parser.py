@@ -4,6 +4,7 @@
   （リポジトリルートから。または tools/law-rag-ingest/ で python3 -m unittest）
 """
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -58,6 +59,105 @@ class ParseLawXmlTest(unittest.TestCase):
         main3 = next(c for c in self.chunks if c["unique_anchor"] == "Main_Article_3")
         self.assertIn("テストとは検証をいう。", main3["content"])
         self.assertIn("（定義）", main3["content"])
+
+    def test_no_main_provision_chunk_when_articles_exist(self) -> None:
+        # 条のある本則は従来どおり条ごとのチャンクだけ。
+        self.assertNotIn("Main_Provision", self.anchors)
+
+
+def _law_xml(main_provision: str, suppl_provision: str = "") -> io.BytesIO:
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Law Era="Showa" Year="22" LawType="CabinetOrder" PromulgateMonth="5" PromulgateDay="3">
+  <LawNum>昭和二十二年政令第一号</LawNum>
+  <LawBody>
+    <LawTitle>テスト令</LawTitle>
+    <MainProvision>{main_provision}</MainProvision>
+    {suppl_provision}
+  </LawBody>
+</Law>"""
+    return io.BytesIO(xml.encode("utf-8"))
+
+
+class MainProvisionWithoutArticlesTest(unittest.TestCase):
+    def test_paragraph_with_items_becomes_one_chunk(self) -> None:
+        chunks = x.parse_law_xml(
+            _law_xml(
+                """
+      <Paragraph Num="1">
+        <ParagraphNum/>
+        <ParagraphSentence><Sentence>次に掲げる者を指定する。</Sentence></ParagraphSentence>
+        <Item Num="1">
+          <ItemTitle>一</ItemTitle>
+          <ItemSentence><Sentence>甲</Sentence></ItemSentence>
+        </Item>
+        <Item Num="2">
+          <ItemTitle>二</ItemTitle>
+          <ItemSentence><Sentence>乙</Sentence></ItemSentence>
+        </Item>
+      </Paragraph>"""
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        chunk = chunks[0]
+        self.assertEqual(chunk["unique_anchor"], "Main_Provision")
+        self.assertIsNone(chunk["anchor"])
+        self.assertEqual(chunk["article_summary"], "本則")
+        self.assertEqual(chunk["law_title"], "テスト令")
+        self.assertEqual(chunk["law_num"], "昭和二十二年政令第一号")
+        self.assertEqual(
+            chunk["content"],
+            "本則\n　　次に掲げる者を指定する。\n　　一　甲\n　　二　乙",
+        )
+
+    def test_articles_only_in_original_supplementary_provision(self) -> None:
+        chunks = x.parse_law_xml(
+            _law_xml(
+                """
+      <Paragraph Num="1">
+        <ParagraphNum/>
+        <ParagraphSentence><Sentence>本令は、テストのために定める。</Sentence></ParagraphSentence>
+      </Paragraph>""",
+                """
+    <SupplProvision>
+      <Article Num="1">
+        <ArticleTitle>第一条</ArticleTitle>
+        <Paragraph Num="1">
+          <ParagraphNum/>
+          <ParagraphSentence><Sentence>この政令は、公布の日から施行する。</Sentence></ParagraphSentence>
+        </Paragraph>
+      </Article>
+    </SupplProvision>""",
+            )
+        )
+        self.assertEqual(
+            [c["unique_anchor"] for c in chunks],
+            ["Main_Provision", "Suppl_Article_1"],
+        )
+
+    def test_blank_paragraph_makes_no_chunk(self) -> None:
+        # 未施行の版で本則が空の項 1 つだけになっているもの。
+        chunks = x.parse_law_xml(
+            _law_xml(
+                """
+      <Paragraph Num="1">
+        <ParagraphNum/>
+        <ParagraphSentence><Sentence/></ParagraphSentence>
+      </Paragraph>"""
+            )
+        )
+        self.assertEqual(chunks, [])
+
+    def test_deletion_only_makes_no_chunk(self) -> None:
+        chunks = x.parse_law_xml(
+            _law_xml(
+                """
+      <Paragraph Num="1">
+        <ParagraphNum/>
+        <ParagraphSentence><Sentence>削除</Sentence></ParagraphSentence>
+      </Paragraph>"""
+            )
+        )
+        self.assertEqual(chunks, [])
 
 
 class ProcessFileTest(unittest.TestCase):

@@ -126,10 +126,27 @@ def is_deletion_stub(content: str) -> bool:
     return body.strip("　 \n\t") == "削除"
 
 
+# 条の無い本則（MainProvision の直下が項だけ）のチャンクの固定名と見出し。
+MAIN_PROVISION_ANCHOR = "Main_Provision"
+MAIN_PROVISION_SUMMARY = "本則"
+
+
+def format_main_provision_paragraphs(paragraphs: list[ET.Element]) -> str:
+    """条の無い本則の項を、条の content と同じ形（先頭行が見出し・項は 1 段下げ）へ整形する。
+
+    見出しの無い Article に項を入れて format_article_text に渡し、先頭行に「本則」を置く。
+    """
+    holder = ET.Element("Article")
+    holder.extend(paragraphs)
+    body = format_article_text(holder)
+    return f"{MAIN_PROVISION_SUMMARY}\n{body}" if body else MAIN_PROVISION_SUMMARY
+
+
 def parse_law_xml(xml_file: str | Path) -> list[dict[str, str | None]]:
     """法令 XML を条（Article）単位のチャンク辞書のリストへ変換する。
 
     本則（MainProvision）＋原始附則（AmendLawNum 属性なしの SupplProvision）のみを対象とし、
+    条の無い本則は直下の項をまとめて 1 チャンク（unique_anchor は Main_Provision）にする。
     廃止条文（Delete="true"）・改正附則（AmendLawNum 付き SupplProvision）・**削除 stub（本文が
     「削除」だけの範囲/単条削除条文・is_deletion_stub）** は除外する。削除 stub は検索ノイズに
     なるだけで法令内容を持たないため取り込まない（所見 B 対処）。
@@ -179,6 +196,26 @@ def parse_law_xml(xml_file: str | Path) -> list[dict[str, str | None]]:
     # 1. 本則
     for article in root.findall(".//MainProvision//Article"):
         process_article(article, "Main")
+
+    # 1b. 条の無い本則：直下の項をまとめて 1 チャンクにする（条のある本則は上の処理だけ）。
+    #     本文が空（空白だけ）の版と、本文が「削除」だけのものは作らない。
+    main_provision = root.find(".//MainProvision")
+    if main_provision is not None and main_provision.find(".//Article") is None:
+        paragraphs = main_provision.findall("./Paragraph")
+        if paragraphs:
+            content = format_main_provision_paragraphs(paragraphs)
+            body = content.split("\n", 1)[1] if "\n" in content else ""
+            if body.strip("　 \n\t") and not is_deletion_stub(content):
+                chunks.append(
+                    {
+                        "law_num": law_num,
+                        "law_title": law_title,
+                        "unique_anchor": MAIN_PROVISION_ANCHOR,
+                        "anchor": None,
+                        "content": content,
+                        "article_summary": MAIN_PROVISION_SUMMARY,
+                    }
+                )
 
     # 2. 原始附則（改正附則 AmendLawNum は除外）
     for suppl_provision in root.findall(".//SupplProvision"):

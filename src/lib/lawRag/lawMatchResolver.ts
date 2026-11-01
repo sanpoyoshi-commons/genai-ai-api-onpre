@@ -81,7 +81,7 @@ function toRejected(c: { lawNum: string; lawTitle: string; score: number }): Rej
  * 判定粒度を**本則条文**に置くのが要点。e-Gov 一括データでは未施行の新法でも附則第一条（施行期日）は
  * 公布日施行で現行版になるため、「現行索引に在るか」では新法を現行と誤判定する（実測：防災庁設置法は
  * 現行条文 2 件＝附則のみ・本則 19 条は未施行）。本則が 1 条も施行されていない法令だけを施行予定とする。
- * 本則を持たない法令（廃止政令等・実測 42 件）は未施行ではないので現行に入れる。
+ * 本則を持たない法令（本則が空で附則だけの法令・実測 1 件）は未施行ではないので現行に入れる。
  */
 export function classifyEnforcement(statuses: LawEnforcementStatus[]): {
   current: LawEnforcementStatus[];

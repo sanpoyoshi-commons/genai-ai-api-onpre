@@ -104,7 +104,7 @@ test('classifyEnforcement: 本則が 1 条も施行されていない法令だ�
   const { current, pending } = classifyEnforcement([
     status({ lawNum: 'cur', currentMainArticles: 5, futureMainArticles: 3 }),
     status({ lawNum: 'pend', currentMainArticles: 0, futureMainArticles: 19 }),
-    // 本則を持たない法令（廃止政令等・実測 42 件）は未施行ではない。
+    // 本則を持たない法令（本則が空で附則だけの法令・実測 1 件）は未施行ではない。
     status({ lawNum: 'suppl', currentMainArticles: 0, futureMainArticles: 0 }),
   ]);
   assert.deepEqual(current.map((s) => s.lawNum), ['cur', 'suppl']);
