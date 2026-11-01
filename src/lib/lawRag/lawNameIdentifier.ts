@@ -111,6 +111,15 @@ export function normalizeLawName(name: string): string {
   return inner && inner.length > 0 ? inner : base;
 }
 
+/**
+ * 問いの本文を題名の突き合わせ用に正規化する。NFKC（全角半角の統一）→空白除去だけを行う。
+ * normalizeLawName は括弧書きと制定番号を落とすため、問いにかけると括弧の中に書かれた題名や
+ * 「令和◯年…第◯号」を含む題名の一部が消え、問いの中で題名を見つけられなくなる。
+ */
+export function normalizeQueryText(query: string): string {
+  return (query ?? '').normalize('NFKC').replace(/[\s　]/g, '');
+}
+
 /** 正規化済み名称から法形式の接尾辞を反復的に剥がす。 */
 function stripFormSuffix(normalized: string): string {
   let s = normalized;

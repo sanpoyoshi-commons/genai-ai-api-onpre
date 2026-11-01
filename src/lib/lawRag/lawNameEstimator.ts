@@ -29,8 +29,9 @@ export const LAW_NAME_SYSTEM_PROMPT = `あなたは日本の法令に精通し�
 - 有効な JSON のみを 1 行で出力する。説明文・前置き・マークダウン・思考過程は一切含めない。
 - 形式: {"law_names": ["正式名称1", "正式名称2"]}`;
 
-// クエリ中の法令名らしき表記（移植元 _QUERY_LAW_NAME_PATTERN）。
-const QUERY_LAW_NAME_PATTERN = /[一-龥ァ-ヴー]+(?:法律|法|規則|政令|条例|省令)/g;
+// クエリ中の法令名らしき表記（移植元 _QUERY_LAW_NAME_PATTERN）。語の後ろに漢字・カタカナが続く所では
+// 切らない（「業務方法書」から「業務方法」を切り出さない）。
+const QUERY_LAW_NAME_PATTERN = /[一-龥ァ-ヴー]+(?:法律|法|規則|政令|条例|省令)(?![一-龥ァ-ヴー])/g;
 
 const MAX_LAW_NAMES = 10;
 
@@ -107,10 +108,23 @@ export function parseLawNames(responseText: string): string[] {
   return [];
 }
 
+/** クエリから切り出した法令名候補と、その位置（end は含まない）。 */
+export interface QueryLawNameSpan {
+  name: string;
+  start: number;
+  end: number;
+}
+
+/** クエリから法令名候補を位置つきで抽出する（4 文字未満の一般語は除外）。 */
+export function extractLawNameSpansFromQuery(query: string): QueryLawNameSpan[] {
+  return [...(query ?? '').matchAll(QUERY_LAW_NAME_PATTERN)]
+    .filter((m) => m[0].length >= 4)
+    .map((m) => ({ name: m[0], start: m.index, end: m.index + m[0].length }));
+}
+
 /** クエリから法令名候補を直接抽出する（移植元 _extract_law_names_from_query・4 文字未満の一般語は除外）。 */
 export function extractLawNamesFromQuery(query: string): string[] {
-  const matches = [...(query ?? '').matchAll(QUERY_LAW_NAME_PATTERN)].map((m) => m[0]);
-  return matches.filter((m) => m.length >= 4);
+  return extractLawNameSpansFromQuery(query).map((s) => s.name);
 }
 
 /** 通称→正式名称の辞書（キーは正規化済み通称、値は正式名称）。 */

@@ -11,17 +11,20 @@ import {
 import { logger } from '../logger.js';
 import {
   LAW_INDEX_UNAVAILABLE,
+  findMasterTitle,
   resolveLawMatch,
   type LawMatchStage,
+  type QueryTitleMatch,
   type RejectedLawCandidate,
 } from './lawMatchResolver.js';
 import type { LawNameAliases, LawNameEstimator } from './lawNameEstimator.js';
 import {
   applyLawNameAliases,
   expandLawNamesWithOrdinances,
-  extractLawNamesFromQuery,
+  extractLawNameSpansFromQuery,
   resolveLawNameAliases,
 } from './lawNameEstimator.js';
+import { normalizeQueryText } from './lawNameIdentifier.js';
 import type { ArticleSelector } from './articleSelector.js';
 import type { ReportGenerator } from './reportGenerator.js';
 import {
@@ -60,7 +63,7 @@ import {
  *   （距離の絶対値を見ない）。本実装は段2 を lawMatchResolver の判定階層へ置き換え、応答を 3 値にする：
  *     【現行】    … 従来と同一の回答（後方互換）。
  *     【施行予定】… 本則が未施行の法令。施行日と附則の施行期日規定を添え「まだ施行されていない」と答える。
- *                   e-Gov 全版データを持つ本配布物だけが返せる応答で、**上流 Lawsy に対応経路は無い**。
+ *                   未施行の版を収める本配布物だけが返せる応答で、**上流 Lawsy に対応経路は無い**。
  *     【該当なし】… 固有部分の一致する法令が無い。**条文を一切提示しない**（近い法令を推測で出さない）。
  *   法令名マスタが空の環境（データ未投入の開発 DB・ユニットテストの fake）では従来経路へフォールバックする。
  */
@@ -93,22 +96,29 @@ export const ERR_NO_FULL_ARTICLES = '該当する条文が見つかりません�
 /**
  * 【該当なし】の応答文（**on-prem 独自追加**）。固有部分の一致する法令が無いときに返す。
  * 近い名称の別法令を推測で提示しないことを明示する（設計 §3・§4-2 の安全側方針）。
+ * 末尾は確かめ先として e-Gov 法令検索を案内する。URL は固定の文字列で、問いの文字を埋め込まない。
  */
 export const ERR_NO_MATCH =
   'お尋ねの内容に該当する法令・条文が、同梱の法令データの中に見当たりませんでした。' +
   '名称の近い別の法令を根拠として提示することは避けています。' +
-  '法令名がお分かりの場合は、正式名称を含めて質問し直してください。';
+  '法令名がお分かりの場合は、e-Gov 法令検索（https://laws.e-gov.go.jp/ ）で正式名称と条文を確かめてください。';
 
 /** 段2 の識別結果（3 値応答の分岐に使う）。 */
 type LawIdentification =
-  | { kind: 'current'; lawNums: string[]; stage?: LawMatchStage }
+  | { kind: 'current'; lawNums: string[]; stage?: LawMatchStage; queryTitles: QueryTitleMatch[] }
   | {
       kind: 'pending';
       lawNums: string[];
       pending: LawEnforcementStatus[];
       stage: LawMatchStage;
+      queryTitles: QueryTitleMatch[];
     }
-  | { kind: 'none'; stage: LawMatchStage; rejected: RejectedLawCandidate[] }
+  | {
+      kind: 'none';
+      stage: LawMatchStage;
+      rejected: RejectedLawCandidate[];
+      queryTitles: QueryTitleMatch[];
+    }
   | { kind: 'unidentified' };
 
 /** as_of_date の受理形式（YYYY-MM-DD）。 */
@@ -277,7 +287,12 @@ export class LawReportPipeline {
       return this.identifyLawsLegacy(query, searchLawNames);
     }
     if (match.verdict === 'none') {
-      return { kind: 'none', stage: match.stage, rejected: match.rejected };
+      return {
+        kind: 'none',
+        stage: match.stage,
+        rejected: match.rejected,
+        queryTitles: match.queryTitles,
+      };
     }
     if (match.verdict === 'pending') {
       return {
@@ -285,9 +300,39 @@ export class LawReportPipeline {
         stage: match.stage,
         lawNums: match.lawNums,
         pending: match.pending,
+        queryTitles: match.queryTitles,
       };
     }
-    return { kind: 'current', stage: match.stage, lawNums: match.lawNums };
+    return {
+      kind: 'current',
+      stage: match.stage,
+      lawNums: match.lawNums,
+      queryTitles: match.queryTitles,
+    };
+  }
+
+  /**
+   * 判定の経路のログに共通で載せる項目。推定した法令名は、法令名マスタの題名に当たったものだけを
+   * **当たった題名で**出し（推定の文字列そのものは出さない）、当たらなかったものは件数だけ出す。問いの
+   * 本文と、問いから切り出した語は出さない（利用者の入力がそのまま入るため）。見つかった題名も件数だけにする。
+   */
+  private async identificationLogFields(
+    requestId: string,
+    identification: Exclude<LawIdentification, { kind: 'unidentified' }>,
+    estimatedLawNames: string[],
+  ): Promise<Record<string, unknown>> {
+    const index = await this.deps.retriever.getLawTitleIndex();
+    const masterTitles = estimatedLawNames.map((n) => findMasterTitle(index, n));
+    const matched = masterTitles.filter((t): t is string => t !== undefined);
+    return {
+      requestId,
+      verdict: identification.kind,
+      stage: identification.stage,
+      lawNums: identification.kind === 'none' ? [] : identification.lawNums,
+      queryTitleCount: identification.queryTitles.length,
+      estimatedLawNames: [...new Set(matched)],
+      unmatchedEstimatedLawNameCount: estimatedLawNames.length - matched.length,
+    };
   }
 
   /**
@@ -322,7 +367,7 @@ export class LawReportPipeline {
         ]);
       }
     }
-    return { kind: 'current', lawNums };
+    return { kind: 'current', lawNums, queryTitles: [] };
   }
 
   /**
@@ -365,8 +410,10 @@ export class LawReportPipeline {
     const asOf = asOfDate && AS_OF_DATE_PATTERN.test(asOfDate) ? asOfDate : undefined;
     const asOfMode = asOf !== undefined;
 
-    // ① クエリから元法令名抽出（読み替え検出用に web 前表記を保持）。
-    const queryLawNames = extractLawNamesFromQuery(query);
+    // ① クエリから元法令名抽出（読み替え検出用に web 前表記を保持）。位置は題名の突き合わせと同じ
+    // 正規化（NFKC・空白除去）の上で取り、見つかった題名の範囲に入る語を後で見分けられるようにする。
+    const querySpans = extractLawNameSpansFromQuery(normalizeQueryText(query));
+    const queryLawNames = querySpans.map((s) => s.name);
 
     // ② ローカル LLM 法令名推定。
     const lawNames = await this.deps.estimator.estimate(query, model, requestId);
@@ -380,9 +427,7 @@ export class LawReportPipeline {
       // 【該当なし】＝条文を一切出さない。将来の緩和判断のため棄却候補を残す（設計 §4-2）。
       logger.info(
         {
-          requestId,
-          stage: identification.stage,
-          estimatedLawNames: lawNames,
+          ...(await this.identificationLogFields(requestId, identification, lawNames)),
           rejected: identification.rejected.map((r) => r.lawTitle),
         },
         '法令RAG: 固有部分の一致する法令が無いため条文を提示しません（該当なし）',
@@ -393,8 +438,7 @@ export class LawReportPipeline {
     if (pendingMode) {
       logger.info(
         {
-          requestId,
-          stage: identification.stage,
+          ...(await this.identificationLogFields(requestId, identification, lawNames)),
           laws: identification.pending.map((p) => ({
             lawTitle: p.lawTitle,
             futureMainArticles: p.futureMainArticles,
@@ -402,6 +446,12 @@ export class LawReportPipeline {
           })),
         },
         '法令RAG: 本則が未施行の法令として回答します（施行予定）',
+      );
+    } else if (identification.stage !== undefined) {
+      // 従来経路（法令名マスタが空）は判定の段を持たないので出さない。
+      logger.info(
+        await this.identificationLogFields(requestId, identification, lawNames),
+        '法令RAG: 現行の法令として回答します（現行）',
       );
     }
 
@@ -412,8 +462,18 @@ export class LawReportPipeline {
       return { report: ERR_NO_ARTICLES };
     }
 
-    // ⑤ 読み替え・名称乖離の警告（回答冒頭での開示指示）。
-    const substitutionWarning = buildSubstitutionWarning(queryLawNames, lawNames);
+    // ⑤ 読み替え・名称乖離の警告（回答冒頭での開示指示）。読み替えは、見つかった題名の範囲に入る語
+    // （題名の切れ端）を除いた名乗りと見つかった題名を、推定に見つかった題名を足したものと比べる。
+    // 題名どおりに名乗った法令はそのまま答えに使うので、読み替えには当たらない。
+    const titles = identification.queryTitles;
+    const titleNames = titles.map((t) => t.lawTitle);
+    const spokenOutsideTitles = querySpans
+      .filter((s) => !titles.some((t) => t.start <= s.start && s.end <= t.end))
+      .map((s) => s.name);
+    const substitutionWarning = buildSubstitutionWarning(
+      [...spokenOutsideTitles, ...titleNames],
+      [...lawNames, ...titleNames],
+    );
     const divergenceWarning = checkLawNameDivergence(lawNames, articles0);
 
     // ⑥ LLM 関連条文選別（5 件超のみ）。

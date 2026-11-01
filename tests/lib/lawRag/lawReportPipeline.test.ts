@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import type {
   ArticleKey,
   ArticleWithSummary,
@@ -12,6 +12,7 @@ import type {
   ResolvedVersion,
 } from '../../../src/repositories/lawRetriever.js';
 import { versionKey } from '../../../src/repositories/lawRetriever.js';
+import { logger } from '../../../src/lib/logger.js';
 import type { LlmClient } from '../../../src/lib/llm/llmClient.js';
 import { LawNameEstimator } from '../../../src/lib/lawRag/lawNameEstimator.js';
 import { ArticleSelector } from '../../../src/lib/lawRag/articleSelector.js';
@@ -529,4 +530,155 @@ test('3 値: 法令名マスタが空なら従来経路（最近傍1件）へフ
   const res = await pipeline.generateReport('消滅時効は', 'm', 'r');
   assert.equal(retriever.resolveCalls.length, 1);
   assert.ok(res.report.includes('## 出典'));
+});
+
+function enforcementOf(lawNum: string, lawTitle: string): LawEnforcementStatus {
+  return {
+    lawNum,
+    lawTitle,
+    currentMainArticles: 10,
+    futureMainArticles: 0,
+    earliestFutureEnforceDate: null,
+    enforcementClause: null,
+  };
+}
+
+function pipelineSeeing(retriever: LawRetrieverLike, estimateJson: string) {
+  const cap = capturingLlm('# T\n本文 [1]。');
+  const pipeline = new LawReportPipeline({
+    estimator: new LawNameEstimator(fixedLlm(estimateJson)),
+    selector: new ArticleSelector(fixedLlm('1')),
+    generator: new ReportGenerator(cap.llm),
+    retriever,
+  });
+  return { pipeline, seen: cap.seen };
+}
+
+test('題名どおりに名乗った法令は、題名の切れ端があっても読み替えの警告を出さずに答える', async () => {
+  const title = '公益信託に関する法律施行規則';
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('k1', '公益信託に関する法律'), titleEntry('k2', title)];
+  retriever.enforcement = [enforcementOf('k2', title)];
+  retriever.byContent = [makeArticle({ lawNum: 'k2', lawTitle: title })];
+  const { pipeline, seen } = pipelineSeeing(retriever, '{"law_names":["公益信託に関する法律"]}');
+  const res = await pipeline.generateReport(`${title}の内容を教えて`, 'm', 'r');
+  assert.notEqual(res.report, ERR_NO_MATCH);
+  assert.ok(retriever.contentCalls[0]?.lawNums.includes('k2'));
+  assert.ok(!seen.join('\n').includes('読み替え通知'));
+});
+
+test('題名と並べて実在しない法令名を名乗れば、その名前について読み替えの警告を出す', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('m1', '民法')];
+  retriever.enforcement = [enforcementOf('m1', '民法')];
+  retriever.byContent = [makeArticle({ lawNum: 'm1', lawTitle: '民法' })];
+  const { pipeline, seen } = pipelineSeeing(retriever, '{"law_names":["民法"]}');
+  await pipeline.generateReport('人工知能人格権法と民法の関係は', 'm', 'r');
+  const sent = seen.join('\n');
+  assert.ok(sent.includes('読み替え通知'));
+  assert.ok(sent.includes('人工知能人格権法'));
+});
+
+test('【該当なし】の文は、同梱データに無いことを告げ、e-Gov 法令検索での確かめを案内して終わる', () => {
+  assert.ok(ERR_NO_MATCH.startsWith('お尋ねの内容に該当する法令・条文が、同梱の法令データの中に見当たりませんでした。'));
+  assert.ok(
+    ERR_NO_MATCH.endsWith(
+      '法令名がお分かりの場合は、e-Gov 法令検索（https://laws.e-gov.go.jp/ ）で正式名称と条文を確かめてください。',
+    ),
+  );
+});
+
+// ── 判定の経路のログ ───────────────────────────────────
+
+/** generateReport の間に出た logger.info の 1 つめの引数（項目）とメッセージを集める。 */
+async function captureInfoLogs(run: () => Promise<unknown>): Promise<Array<{ fields: Record<string, unknown>; msg: string }>> {
+  const calls: Array<{ fields: Record<string, unknown>; msg: string }> = [];
+  const m = mock.method(logger, 'info', (fields: Record<string, unknown>, msg: string) => {
+    calls.push({ fields, msg });
+  });
+  try {
+    await run();
+  } finally {
+    m.mock.restore();
+  }
+  return calls.filter((c) => typeof c.msg === 'string' && c.msg.startsWith('法令RAG: '));
+}
+
+test('ログ【現行】: 判定の経路を出し、推定した法令名はマスタに当たったものだけ名前で出す', async () => {
+  const title = '公益信託に関する法律施行規則';
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('k1', '公益信託に関する法律'), titleEntry('k2', title)];
+  retriever.enforcement = [enforcementOf('k1', '公益信託に関する法律'), enforcementOf('k2', title)];
+  retriever.byContent = [makeArticle({ lawNum: 'k2', lawTitle: title })];
+  const { pipeline } = pipelineSeeing(retriever, '{"law_names":["公益信託に関する法律","公益信託振興法"]}');
+  const logs = await captureInfoLogs(() => pipeline.generateReport(`${title}の内容を教えて`, 'm', 'req-1'));
+  assert.equal(logs.length, 1);
+  const f = logs[0]!.fields;
+  assert.equal(f.requestId, 'req-1');
+  assert.equal(f.verdict, 'current');
+  assert.equal(f.stage, '2-0');
+  assert.deepEqual(f.lawNums, ['k1', 'k2']);
+  assert.equal(f.queryTitleCount, 1);
+  assert.deepEqual(f.estimatedLawNames, ['公益信託に関する法律']);
+  assert.equal(f.unmatchedEstimatedLawNameCount, 1);
+  const dumped = JSON.stringify(logs);
+  assert.ok(!dumped.includes('内容を教えて'));
+  assert.ok(!dumped.includes('公益信託振興法'));
+  assert.ok(!dumped.includes(title)); // 見つかった題名は件数だけ。
+});
+
+test('ログ【該当なし】: 同じ項目を出し、実在しない推定名と問いの語は出さない', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('m1', '民法')];
+  retriever.enforcement = [enforcementOf('m1', '民法')];
+  const { pipeline } = pipelineSeeing(retriever, '{"law_names":["人工知能人格権法","民法"]}');
+  const logs = await captureInfoLogs(() => pipeline.generateReport('人工知能人格権法の適用範囲は', 'm', 'req-2'));
+  assert.equal(logs.length, 1);
+  const f = logs[0]!.fields;
+  assert.equal(f.verdict, 'none');
+  assert.equal(f.stage, '2-Q');
+  assert.deepEqual(f.lawNums, []);
+  assert.equal(f.queryTitleCount, 0);
+  assert.deepEqual(f.estimatedLawNames, ['民法']);
+  assert.equal(f.unmatchedEstimatedLawNameCount, 1);
+  assert.deepEqual(f.rejected, []);
+  const dumped = JSON.stringify(logs);
+  assert.ok(!dumped.includes('人工知能人格権法'));
+  assert.ok(!dumped.includes('適用範囲'));
+});
+
+test('ログ【施行予定】: 同じ項目に施行予定の法令の情報を添える', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('b1', '防災庁設置法')];
+  retriever.titleCandidates = [{ lawNum: 'b1', lawTitle: '防災庁設置法', score: 0.25 }];
+  retriever.enforcement = [
+    { ...enforcementOf('b1', '防災庁設置法'), currentMainArticles: 0, futureMainArticles: 19 },
+  ];
+  retriever.byContent = [makeArticle({ lawNum: 'b1', lawTitle: '防災庁設置法', isFuture: true })];
+  const { pipeline } = pipelineSeeing(retriever, '{"law_names":[]}');
+  const logs = await captureInfoLogs(() => pipeline.generateReport('防災庁はもう設置されていますか', 'm', 'req-3'));
+  assert.equal(logs.length, 1);
+  const f = logs[0]!.fields;
+  assert.equal(f.verdict, 'pending');
+  assert.equal(f.stage, '2-3');
+  assert.deepEqual(f.lawNums, ['b1']);
+  assert.equal(f.queryTitleCount, 0);
+  assert.deepEqual(f.estimatedLawNames, []);
+  assert.equal(f.unmatchedEstimatedLawNameCount, 0);
+  assert.equal((f.laws as Array<{ lawTitle: string }>)[0]?.lawTitle, '防災庁設置法');
+  assert.ok(!JSON.stringify(logs).includes('もう設置されていますか'));
+});
+
+test('ログ: 推定した法令名は当たったマスタの題名で出し、括弧の中の語は出さない', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('m1', '民法')];
+  retriever.enforcement = [enforcementOf('m1', '民法')];
+  retriever.byContent = [makeArticle({ lawNum: 'm1', lawTitle: '民法' })];
+  // 正規化は括弧書きを落とすので、この推定は「民法」に当たる。
+  const { pipeline } = pipelineSeeing(retriever, '{"law_names":["民法（秘密の語）"]}');
+  const logs = await captureInfoLogs(() => pipeline.generateReport('消滅時効は', 'm', 'req-4'));
+  assert.equal(logs.length, 1);
+  assert.deepEqual(logs[0]!.fields.estimatedLawNames, ['民法']);
+  assert.equal(logs[0]!.fields.unmatchedEstimatedLawNameCount, 0);
+  assert.ok(!JSON.stringify(logs).includes('秘密の語'));
 });

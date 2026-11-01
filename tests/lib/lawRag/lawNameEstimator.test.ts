@@ -8,6 +8,7 @@ import {
   LawNameEstimator,
   applyLawNameAliases,
   expandLawNamesWithOrdinances,
+  extractLawNameSpansFromQuery,
   extractLawNamesFromQuery,
   parseLawNames,
   resolveLawNameAliases,
@@ -66,6 +67,29 @@ test('extractLawNamesFromQuery picks law-like tokens >=4 chars', () => {
   assert.ok(out.includes('労働基準法'));
   // 「会社法」は3文字なので除外、「行政法」も3文字で除外。
   assert.ok(!out.includes('会社法'));
+});
+
+test('extractLawNamesFromQuery: 語の後ろに漢字・カタカナが続く所では切らない', () => {
+  assert.deepEqual(
+    extractLawNamesFromQuery(
+      '医療情報基盤・診療報酬審査支払機構の介護保険関係業務に係る業務方法書に記載すべき事項を定める省令の内容を教えて',
+    ),
+    [],
+  );
+});
+
+test('extractLawNamesFromQuery: 法令名の後ろが助詞なら今までどおり切り出す', () => {
+  assert.deepEqual(extractLawNamesFromQuery('公益信託に関する法律施行規則の内容を教えて'), ['法律施行規則']);
+  assert.deepEqual(extractLawNamesFromQuery('人工知能人格権法の適用範囲は'), ['人工知能人格権法']);
+  assert.deepEqual(extractLawNamesFromQuery('労働基準法の休憩時間の規定は'), ['労働基準法']);
+  assert.deepEqual(extractLawNamesFromQuery('防災庁はもう設置されていますか'), []);
+});
+
+test('extractLawNameSpansFromQuery: 切り出した語の位置を返す', () => {
+  assert.deepEqual(extractLawNameSpansFromQuery('この労働基準法と人工知能人格権法'), [
+    { name: '労働基準法', start: 2, end: 7 },
+    { name: '人工知能人格権法', start: 8, end: 16 },
+  ]);
 });
 
 // ── expandLawNamesWithOrdinances ───────────────────────

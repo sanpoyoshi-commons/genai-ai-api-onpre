@@ -10,7 +10,9 @@ import {
   identifierKey,
   identifiersMatch,
   normalizeLawName,
+  normalizeQueryText,
 } from './lawNameIdentifier.js';
+import { expandLawNamesWithOrdinances } from './lawNameEstimator.js';
 
 /**
  * 段2「法令特定」の判定階層（**on-prem 独自追加・移植元 Lawsy に対応物なし**）。
@@ -26,8 +28,11 @@ import {
  *   「該当なし」を返す。閾値では切れないことは実測済み
  *   （bigm_similarity('防災庁設置法','復興庁設置法')=0.5714 > 既定 similarity_limit 0.3）。
  *
- *   さらに上流に無い応答として【施行予定】を持つ。e-Gov 全版データを保持する本配布物は
- *   「まだ施行されていない」と答えられる（UC2）。
+ *   さらに上流に無い応答として【施行予定】を持つ。e-Gov の一括データ（現行の版と未施行の版）を収める
+ *   本配布物は「まだ施行されていない」と答えられる（UC2）。
+ *
+ * 判定の前に、問いの本文に題名がそのまま書かれていないかを見る（findLawTitlesInQuery）。見つかった題名は
+ * 利用者が名乗った法令として段2-Q に使い、推定した法令名にも足す（正式名称で問えば段2-0 で必ず当たる）。
  *
  * ```
  * 段2-0  正規化完全一致（法令名マスタ）              ⇒ 施行状態で【現行】/【施行予定】
@@ -63,6 +68,8 @@ export interface LawMatchResult {
   pending: LawEnforcementStatus[];
   /** 固有部分の不一致で棄却した候補。 */
   rejected: RejectedLawCandidate[];
+  /** 問いの本文の中に見つかった題名（findLawTitlesInQuery）。 */
+  queryTitles: QueryTitleMatch[];
 }
 
 /** 段2-3 のハイブリッド候補取得数（固有部分ゲートで絞るため広めに取る）。 */
@@ -130,11 +137,116 @@ export function matchByIdentifier(index: LawTitleEntry[], lawNames: string[]): L
   return index.filter((e) => keys.has(e.identifier));
 }
 
+/** 問いの本文の中に見つかった題名。位置は normalizeQueryText(問い) の上の文字位置（end は含まない）。 */
+export interface QueryTitleMatch {
+  lawTitle: string;
+  start: number;
+  end: number;
+}
+
+/** 題名の突き合わせ用の索引（鍵の長さごとに、鍵→題名）。 */
+interface TitleMatcher {
+  byLength: Map<number, Map<string, string>>;
+  /** 鍵の長さ（長い順）。 */
+  lengths: number[];
+}
+
+/**
+ * 法令名マスタの配列ごとに 1 回だけ作る（getLawTitleIndex はプロセス内で同じ配列を返す）。
+ * 配列を鍵にするので、マスタを読み直せば古い索引は配列とともに捨てられる。
+ */
+const titleMatcherCache = new WeakMap<LawTitleEntry[], TitleMatcher>();
+
+/** 題名の直前に来たら当てない字（漢字・カタカナ）。「移民法」の中の「民法」を拾わないため。 */
+const WORD_CHAR_BEFORE_TITLE = /[一-龥ァ-ヴー々]/;
+
+function getTitleMatcher(index: LawTitleEntry[]): TitleMatcher {
+  const cached = titleMatcherCache.get(index);
+  if (cached) {
+    return cached;
+  }
+  const byLength = new Map<number, Map<string, string>>();
+  for (const e of index) {
+    // 題名は 2 つの形で引く。正規化した形（括弧書き・制定番号を落とす）と、NFKC・空白除去だけの形
+    // （問いに題名をそのまま書いたとき、括弧書きや「第◯号」を含んだまま一致させる）。
+    for (const key of new Set([e.normalized, normalizeQueryText(e.lawTitle)])) {
+      if (key.length === 0) {
+        continue;
+      }
+      let byKey = byLength.get(key.length);
+      if (!byKey) {
+        byKey = new Map();
+        byLength.set(key.length, byKey);
+      }
+      if (!byKey.has(key)) {
+        byKey.set(key, e.lawTitle);
+      }
+    }
+  }
+  const matcher = { byLength, lengths: [...byLength.keys()].sort((a, b) => b - a) };
+  titleMatcherCache.set(index, matcher);
+  return matcher;
+}
+
+/**
+ * 問いの本文に、法令名マスタの題名がそのまま含まれていればそれを返す（LLM の推定に頼らない法令の特定）。
+ *
+ * - 問いは NFKC・空白除去だけで比べる（normalizeQueryText）。
+ * - 題名の直前の字が漢字・カタカナなら当てない（「移民法」「改正民法」の中の「民法」を拾わない）。
+ *   最小の長さは設けない（「民法と会社法の違い」の「民法」を拾う）。
+ * - 当たりが重なるときは長いほうを採る（「〇〇法」と「〇〇法施行規則」なら「〇〇法施行規則」）。
+ *   同じ長さで重なるときは先に出たほうを採る。
+ *
+ * 戻り値は問いの中の出現順。
+ */
+export function findLawTitlesInQuery(index: LawTitleEntry[], query: string): QueryTitleMatch[] {
+  const text = normalizeQueryText(query);
+  if (text.length === 0 || index.length === 0) {
+    return [];
+  }
+  const { byLength, lengths } = getTitleMatcher(index);
+  const hits: QueryTitleMatch[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (start > 0 && WORD_CHAR_BEFORE_TITLE.test(text[start - 1] ?? '')) {
+      continue;
+    }
+    for (const len of lengths) {
+      if (start + len > text.length) {
+        continue;
+      }
+      const lawTitle = byLength.get(len)?.get(text.slice(start, start + len));
+      if (lawTitle !== undefined) {
+        hits.push({ lawTitle, start, end: start + len });
+      }
+    }
+  }
+  hits.sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
+  const accepted: QueryTitleMatch[] = [];
+  for (const h of hits) {
+    if (!accepted.some((a) => h.start < a.end && a.start < h.end)) {
+      accepted.push(h);
+    }
+  }
+  return accepted.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * 名前が正規化完全一致する法令名マスタの題名（正規化前の題名）を返す（段2-0 と同じ基準）。当たらなければ undefined。
+ * ログに推定した法令名を出すとき、名前そのものではなくマスタの題名を出すために使う。正規化は括弧書きを
+ * 落とすので、「民法（任意の語）」のような名前も当たる。名前をそのまま出すと括弧の中の語まで出てしまう。
+ */
+export function findMasterTitle(index: LawTitleEntry[], name: string): string | undefined {
+  const key = normalizeLawName(name);
+  return key.length > 0 ? getTitleMatcher(index).byLength.get(key.length)?.get(key) : undefined;
+}
+
 /**
  * 段2 の判定を行う。法令名マスタが空（データ未投入）のときは null を返し、呼び出し側は従来経路へ落ちる。
  *
  * @param lawNames      段1 で推定した法令名（通称辞書・施行令補完を適用済み）。空なら段1 が沈黙した経路。
- * @param queryLawNames 利用者が**クエリ本文で名乗った**法令名（同じく辞書適用済み）。段2-Q に使う。
+ *                      問いの本文に見つかった題名（施行令補完つき）をここに足してから判定する。
+ * @param queryLawNames 利用者が**クエリ本文で名乗った**法令名（同じく辞書適用済み）。見つかった題名と
+ *                      合わせて段2-Q に使う。
  */
 export async function resolveLawMatch(
   retriever: LawRetrieverLike,
@@ -146,6 +258,8 @@ export async function resolveLawMatch(
   if (index.length === 0) {
     return LAW_INDEX_UNAVAILABLE;
   }
+  const queryTitles = findLawTitlesInQuery(index, query);
+  const titleNames = queryTitles.map((t) => t.lawTitle);
 
   // 段2-Q：利用者が名乗った法令が手元に 1 つも無いなら、そこで【該当なし】。
   //
@@ -153,23 +267,31 @@ export async function resolveLawMatch(
   // 素通りしてしまう（実測：「人工知能人格権法の適用範囲は」→ 推定 [民法 / 個人情報の保護に関する法律 /
   // 著作権法] → 民法の条文で回答）。利用者が名指しした法令こそが問いの主語なので、それが手元に無いなら
   // 推定器が何を挙げていても条文は出さない。名乗りが無いクエリ（大半の内容質問）はこの段を素通りする。
-  if (queryLawNames.length > 0) {
+  // 問いの本文に見つかった題名も名乗りに入れる（手元にあるので、見つかればこの段は通る）。
+  const namedLawNames = [...queryLawNames, ...titleNames];
+  if (namedLawNames.length > 0) {
     const named = [
-      ...matchExactTitles(index, queryLawNames),
-      ...matchByIdentifier(index, queryLawNames),
+      ...matchExactTitles(index, namedLawNames),
+      ...matchByIdentifier(index, namedLawNames),
     ];
     if (named.length === 0) {
-      return { verdict: 'none', stage: '2-Q', lawNums: [], pending: [], rejected: [] };
+      return { verdict: 'none', stage: '2-Q', lawNums: [], pending: [], rejected: [], queryTitles };
     }
   }
 
+  // 見つかった題名を推定した法令名に足す（推定器が挙げなくても、正式名称で問えば段2-0 で当たる）。
+  const searchLawNames =
+    titleNames.length > 0
+      ? [...new Set([...lawNames, ...expandLawNamesWithOrdinances(titleNames)])]
+      : lawNames;
+
   let stage: LawMatchStage = '2-0';
-  let hits = matchExactTitles(index, lawNames);
+  let hits = matchExactTitles(index, searchLawNames);
   const rejected: RejectedLawCandidate[] = [];
 
-  if (hits.length === 0 && lawNames.length > 0) {
+  if (hits.length === 0 && searchLawNames.length > 0) {
     stage = '2-2';
-    hits = matchByIdentifier(index, lawNames);
+    hits = matchByIdentifier(index, searchLawNames);
   }
 
   if (hits.length === 0) {
@@ -177,8 +299,8 @@ export async function resolveLawMatch(
     const candidates = await retriever.searchLawTitlesHybrid(query, LAW_TITLE_CANDIDATE_TOP_K);
     // ゲート＝固有部分の一致。段1 が法令名を出していればその名と、沈黙していればクエリ本文と突き合わせる。
     const accepts = (title: string): boolean =>
-      lawNames.length > 0
-        ? lawNames.some((n) => identifiersMatch(n, title))
+      searchLawNames.length > 0
+        ? searchLawNames.some((n) => identifiersMatch(n, title))
         : identifierAppearsInQuery(title, query);
     const accepted: LawTitleEntry[] = [];
     for (const c of candidates) {
@@ -197,7 +319,7 @@ export async function resolveLawMatch(
   }
 
   if (hits.length === 0) {
-    return { verdict: 'none', stage, lawNums: [], pending: [], rejected };
+    return { verdict: 'none', stage, lawNums: [], pending: [], rejected, queryTitles };
   }
 
   const statuses = await retriever.getLawEnforcementStatus(hits.map((h) => h.lawNum));
@@ -210,6 +332,7 @@ export async function resolveLawMatch(
       lawNums: current.map((s) => s.lawNum),
       pending: [],
       rejected,
+      queryTitles,
     };
   }
   return {
@@ -218,5 +341,6 @@ export async function resolveLawMatch(
     lawNums: pending.map((s) => s.lawNum),
     pending,
     rejected,
+    queryTitles,
   };
 }
