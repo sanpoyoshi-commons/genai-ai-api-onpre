@@ -1,4 +1,5 @@
 import {
+  articleHeading,
   articleTitle,
   egovUrl,
   versionKey,
@@ -31,6 +32,7 @@ import {
   buildReferenceMetas,
   buildReferences,
   finalizeReport,
+  linkArticleNumberCitations,
   resolveCitedReferences,
   toFullArticles,
   type LawRagReferenceMeta,
@@ -240,6 +242,9 @@ export class LawReportPipeline {
         // 条見出しも解決した版のものへ組み直す。本文だけ差し替えると、出典行の見出し（索引＝現行版）と
         // 引用本文（as_of 版）が別の版になり「どの版で答えたか」の表示が食い違う。
         title: a.lawTitle ? articleTitle(a.lawTitle, v.articleSummary) : a.title,
+        displayTitle: a.lawTitle
+          ? articleHeading(a.lawTitle, a.uniqueAnchor, v.content ?? a.content, v.articleSummary)
+          : a.displayTitle,
         content: v.content ?? a.content,
         anchor: v.anchor ?? a.anchor,
         url: egovUrl(v.lawId, v.anchor),
@@ -474,7 +479,11 @@ export class LawReportPipeline {
       [...spokenOutsideTitles, ...titleNames],
       [...lawNames, ...titleNames],
     );
-    const divergenceWarning = checkLawNameDivergence(lawNames, articles0);
+    // 問いの中の題名で法令が決まり、取り出した条がすべてその題名の法令なら、推定した名前が題名と
+    // 違っても乖離ではない（推定は答えに使っていない）。
+    const titledOnly =
+      titleNames.length > 0 && articles0.every((a) => titleNames.includes(a.lawTitle));
+    const divergenceWarning = titledOnly ? '' : checkLawNameDivergence(lawNames, articles0);
 
     // ⑥ LLM 関連条文選別（5 件超のみ）。
     const articles = await this.deps.selector.select(query, articles0, model, requestId);
@@ -531,7 +540,12 @@ export class LawReportPipeline {
       withWarnings = buildPendingEnforcementNotice(identification.pending) + withWarnings;
     }
 
-    const report = await this.deps.generator.generate(query, withWarnings, model, requestId);
+    // 条の番号で書かれた引用（[33条] など）は、ここで 1 回だけ [n] に直す。出典節と構造化メタは
+    // 直した後の本文から作るので、両者は一致する。
+    const report = linkArticleNumberCitations(
+      await this.deps.generator.generate(query, withWarnings, model, requestId),
+      searchResults,
+    );
 
     // ⑨ 引用リンク化・出典結合＋データ基準日焼き込み（常時・law_rag_meta 未投入なら焼き込みなし）。
     const meta = await this.deps.retriever.getLawRagMeta();

@@ -4,6 +4,7 @@ import type { PrismaClient } from '../../src/generated/prisma/client.js';
 import type { EmbeddingClient } from '../../src/lib/llm/embeddingClient.js';
 import {
   LawRetriever,
+  articleHeading,
   dedupeLawNums,
   egovUrl,
   toVectorLiteral,
@@ -32,6 +33,78 @@ test('dedupeLawNums keeps first occurrence order', () => {
   assert.deepEqual(
     dedupeLawNums([{ lawNum: 'A' }, { lawNum: 'B' }, { lawNum: 'A' }, { lawNum: 'C' }]),
     ['A', 'B', 'C'],
+  );
+});
+
+
+// ── articleHeading（参考情報・出典の見出し）────────────────
+
+const LAW = '公益信託に関する法律施行規則';
+
+test('articleHeading: 見出しのある条は法令名＋条の名＋見出し', () => {
+  assert.equal(
+    articleHeading(LAW, 'Main_Article_53', '（報告）　第五十三条\n　公益信託の受託者は…', '（報告）'),
+    `${LAW} 第五十三条（報告）`,
+  );
+});
+
+test('articleHeading: 見出しの無い条は第 1 項の文を付けない', () => {
+  assert.equal(
+    articleHeading(LAW, 'Main_Article_16', '第十六条\n　受託者は、…しなければならない。', '受託者は、…しなければならない。'),
+    `${LAW} 第十六条`,
+  );
+});
+
+test('articleHeading: 附則の条は「附則」を前に付ける', () => {
+  assert.equal(
+    articleHeading('〇〇法', 'Suppl_Article_1', '（施行期日）　第一条\n　この法律は、…', '（施行期日）'),
+    '〇〇法 附則第一条（施行期日）',
+  );
+});
+
+test('articleHeading: 条の名が先に来る形', () => {
+  assert.equal(
+    articleHeading('〇〇法', 'Main_Article_25', '第二十五条　（開廷の場所）\n　…', '（開廷の場所）'),
+    '〇〇法 第二十五条（開廷の場所）',
+  );
+});
+
+test('articleHeading: 算用数字の条の名は書かれたまま', () => {
+  assert.equal(
+    articleHeading('〇〇規則', 'Main_Article_1', '（趣旨）　第１条\n　…', '（趣旨）'),
+    '〇〇規則 第１条（趣旨）',
+  );
+});
+
+test('articleHeading: 片仮名の「ノ」の枝番は書かれたまま', () => {
+  assert.equal(
+    articleHeading('〇〇法', 'Main_Article_15_2', '第十五条ノ二\n　…', '…'),
+    '〇〇法 第十五条ノ二',
+  );
+});
+
+test('articleHeading: 見出しの中に入れ子の括弧があっても条の名を取る', () => {
+  const caption = '（就学事務システム（就学援助）に関する事務）';
+  assert.equal(
+    articleHeading('〇〇省令', 'Main_Article_3', `${caption}　第三条\n　…`, caption),
+    `〇〇省令 第三条${caption}`,
+  );
+});
+
+test('articleHeading: 条の無い法令の本則は「法令名 本則」', () => {
+  assert.equal(articleHeading('〇〇令', 'Main_Provision', '　１　…', '本則'), '〇〇令 本則');
+});
+
+test('articleHeading: 条の名が取れないときは articleTitle の形に戻す', () => {
+  // 1 行目に「条」の字が無い（索引に 1 件ある形）。
+  assert.equal(
+    articleHeading('〇〇法', 'Main_Article_999999999', '第四百六十三の二\n　…', '（特例）'),
+    '〇〇法 （特例）',
+  );
+  // large 法令の summary だけの本文（1 行目に条の名が無い）。
+  assert.equal(
+    articleHeading('〇〇法', 'Main_Article_5', '（定義）', '（定義）'),
+    '〇〇法 （定義）',
   );
 });
 
@@ -284,6 +357,24 @@ test('getFullArticles builds title and e-Gov url', async () => {
   assert.equal(out[0]?.title, '労働基準法 労働時間');
   assert.equal(out[0]?.url, 'https://laws.e-gov.go.jp/law/id1#Mp-At_32');
   assert.equal(out[0]?.content, '本文');
+});
+
+test('getFullArticles builds the display heading from the full content (summary だけの条を差し替えた後)', async () => {
+  const { prisma } = makePrisma({});
+  (prisma as unknown as { $queryRaw: unknown }).$queryRaw = async () => [
+    {
+      law_id: 'id2_v',
+      law_title: '租税特別措置法',
+      article_summary: '（定義）',
+      content: '（定義）　第二条\n　この法律において、…',
+      unique_anchor: 'Main_Article_2',
+      anchor: 'Mp-At_2',
+    },
+  ];
+  const r = new LawRetriever(fakeEmbedding, prisma);
+  const out = await r.getFullArticles(['L2'], ['Main_Article_2']);
+  assert.equal(out[0]?.title, '租税特別措置法 （定義）');
+  assert.equal(out[0]?.displayTitle, '租税特別措置法 第二条（定義）');
 });
 
 test('getFullArticles returns [] when either list is empty', async () => {

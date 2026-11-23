@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 # genai-ai-api-onpre — Express backend
-# Node.js v24.15.0 LTS (Krypton)
+# Node.js v24.22.3 LTS (Krypton)
 # digest pinning（digest＋#version コメント方針、digest 2026-05-25 一次取得）。
 
-# node:24.15.0-alpine
-FROM node:24.15.0-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f AS build
+# node:24.22.3-alpine
+FROM node:24.22.3-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -27,8 +27,8 @@ RUN npm run build
 FROM build AS migrate
 CMD ["npx", "prisma", "migrate", "deploy"]
 
-# node:24.15.0-alpine
-FROM node:24.15.0-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f AS runtime
+# node:24.22.3-alpine
+FROM node:24.22.3-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./

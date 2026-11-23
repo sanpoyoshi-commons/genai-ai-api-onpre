@@ -5,6 +5,21 @@
 
 # 現在の登録は 0 件。
 #
+# 2026-11-21 に fast-xml-parser の 1 件（GHSA-474x-hrwr-fgx4・CVE-2026-126066）を削除した（期限切れを
+# 待たず、依存ツリーから外して解消したため）。@aws-sdk/core 3.974.12 の要求範囲（^3.972.24）の中で
+# package-lock.json を再解決し、@aws-sdk/xml-builder を 3.972.24 → 3.972.43 にした（package.json は不変）。
+# 3.972.43 は fast-xml-parser に依存しないので、fast-xml-parser・fast-xml-builder・strnum・
+# @nodable/entities・path-expression-matcher・xml-naming は依存ツリーから消え、@smithy/types は
+# 4.14.2 → 4.20.0 になった。解消済みの ID は残さない方針どおり、延長ではなく登録ごと削除した。
+#
+# 2026-11-14 に fast-xml-parser の 1 件（GHSA-474x-hrwr-fgx4・CVE-2026-126066・LOW）を登録した。
+# 経路は @aws-sdk/client-bedrock-runtime 3.1049.0 → @aws-sdk/core 3.974.12 → @aws-sdk/xml-builder
+# 3.972.24 → fast-xml-parser 5.7.3 で、xml-builder 3.972.24 は fast-xml-parser を 5.7.3 に固定している
+# （範囲ではないので overrides の下限では上がらない）。発火には非既定の stopNodes が要り、src には
+# XMLParser・stopNodes・fast-xml-parser の使用が無い。解消の道は、@aws-sdk/xml-builder 3.972.31 以降が
+# fast-xml-parser に依存しないので、@aws-sdk/core の要求範囲（^3.972.24）の中で lock の xml-builder を
+# 上げること。S3 の XML を組む部品なので、試験を通して別の変更で行い、上げたら登録ごと削除する。
+#
 # 2026-10-30 に 2026-10-24 登録の 5 件（body-parser 1 件・fast-uri 4 件）を削除した。クールダウンが
 # 満ちたので overrides を 2.4.0 ／ 3.1.9 へ上げ、qs も 6.16.1 にした。osv-scanner が全件を
 # `has unused ignores` と報告する状態になるため、延長ではなく登録ごと削除した。

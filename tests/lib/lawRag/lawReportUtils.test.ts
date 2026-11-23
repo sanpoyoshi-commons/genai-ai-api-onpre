@@ -12,6 +12,7 @@ import {
   formatEnforceDate,
   formatReference,
   formatReferenceForPrompt,
+  linkArticleNumberCitations,
   normalizeContent,
   resolveCitedReferences,
   sanitizeMermaidContent,
@@ -96,6 +97,23 @@ test('formatReference renders linked title with content blockquote', () => {
   assert.ok(out.includes('> 本文3...'));
 });
 
+test('出典の行と references[].title は displayTitle を使い、プロンプトの見出しは title のまま', () => {
+  const ref: FullArticle = {
+    ...makeFull(1),
+    title: '公益信託に関する法律施行規則',
+    displayTitle: '公益信託に関する法律施行規則 第五十三条（報告）',
+  };
+  assert.ok(formatReference(0, ref).startsWith('[1] 🔗 **[公益信託に関する法律施行規則 第五十三条（報告）]('));
+  assert.equal(buildReferenceMetas([[1, ref]])[0]?.title, '公益信託に関する法律施行規則 第五十三条（報告）');
+  // プロンプトの文は displayTitle が無いときと一字一句同じ。
+  const { displayTitle: _omit, ...withoutDisplay } = ref;
+  assert.equal(formatReferenceForPrompt(0, ref), formatReferenceForPrompt(0, withoutDisplay));
+  assert.equal(
+    formatReferenceForPrompt(0, ref),
+    '[1] 【e-laws公式条文】 公益信託に関する法律施行規則\n本文1',
+  );
+});
+
 // ── toFullArticles ─────────────────────────────────────
 
 test('toFullArticles keeps only articles with content and builds e-Gov URL', () => {
@@ -105,8 +123,8 @@ test('toFullArticles keeps only articles with content and builds e-Gov URL', () 
       lawId: '405AC0000000088_x',
       lawTitle: '民法',
       uniqueAnchor: 'Main_Article_709',
-      articleSummary: '不法行為',
-      content: '本文',
+      articleSummary: '（不法行為による損害賠償）',
+      content: '（不法行為による損害賠償）　第七百九条\n　故意又は過失によって…',
       isSummaryOnly: false,
     },
     {
@@ -122,7 +140,78 @@ test('toFullArticles keeps only articles with content and builds e-Gov URL', () 
   const full = toFullArticles(articles);
   assert.equal(full.length, 1);
   assert.equal(full[0]?.title, '民法');
+  assert.equal(full[0]?.displayTitle, '民法 第七百九条（不法行為による損害賠償）');
+  assert.equal(full[0]?.lawTitle, '民法');
   assert.equal(full[0]?.url, 'https://laws.e-gov.go.jp/law/405AC0000000088');
+});
+
+test('toFullArticles: summary だけの条（large 法令）は条の名が取れず articleTitle の形になる', () => {
+  const full = toFullArticles([
+    {
+      lawNum: 'n3',
+      lawId: 'id3',
+      lawTitle: '租税特別措置法',
+      uniqueAnchor: 'Main_Article_2',
+      articleSummary: '（定義）',
+      content: '（定義）',
+      isSummaryOnly: true,
+    },
+  ]);
+  assert.equal(full[0]?.title, '租税特別措置法');
+  assert.equal(full[0]?.displayTitle, '租税特別措置法 （定義）');
+});
+
+// ── linkArticleNumberCitations ──────────────────────────
+
+/** unique_anchor だけを変えた参考情報を並べる（番号＝並びの位置＋1）。 */
+function refsWith(anchors: string[]): FullArticle[] {
+  return anchors.map((a, i) => ({ ...makeFull(i + 1), uniqueAnchor: a }));
+}
+
+/** Main_Article_101 から始まる、条の番号が参考情報の数より大きい参考情報を n 件。 */
+const fillers = (n: number): string[] => Array.from({ length: n }, (_, i) => `Main_Article_${101 + i}`);
+
+test('linkArticleNumberCitations: [33条]・[第33条] は _Article_33 で終わる参考情報が 1 つなら [n] になる', () => {
+  const refs = refsWith([...fillers(4), 'Main_Article_33']);
+  assert.equal(linkArticleNumberCitations('報告 [33条]。費用 [第33条]。', refs), '報告 [5]。費用 [5]。');
+});
+
+test('linkArticleNumberCitations: 参考情報が 33 件未満なら [33条] は直り、N が参考情報の数以下ならそのまま残す', () => {
+  const refs = refsWith([...fillers(18), 'Main_Article_15', 'Main_Article_33']);
+  assert.equal(refs.length, 20);
+  // [33条] は参考情報の番号（1〜20）とは読めないので直す。
+  assert.equal(linkArticleNumberCitations('[33条]', refs), '[20]');
+  // [15条] は参考情報の [15] に「条」を付けたものとも読めるので、_Article_15 に当たっても残す。
+  assert.equal(linkArticleNumberCitations('[15条]', refs), '[15条]');
+});
+
+test('linkArticleNumberCitations: 枝番 [12条の2] は _Article_12_2 に当たり、参考情報の数に関わらず直る', () => {
+  const refs = refsWith([...fillers(14), 'Main_Article_12_2', 'Main_Article_12']);
+  assert.equal(linkArticleNumberCitations('[12条の2] と [第12条の2]', refs), '[15] と [15]');
+  // 枝番の無い [12条] は参考情報の数（16）以下なので残す。
+  assert.equal(linkArticleNumberCitations('[12条]', refs), '[12条]');
+});
+
+test('linkArticleNumberCitations: 全角の [３３条] も当たる', () => {
+  const refs = refsWith(['Main_Article_101', 'Main_Article_33', 'Main_Article_33_2']);
+  assert.equal(linkArticleNumberCitations('[３３条] と [第３３条の２]', refs), '[2] と [3]');
+});
+
+test('linkArticleNumberCitations: _Article_33 で終わるものが 2 つ（本則と附則）ならそのまま残す', () => {
+  const refs = refsWith(['Main_Article_33', 'Suppl_Article_33', 'Main_Article_101']);
+  assert.equal(linkArticleNumberCitations('[33条]', refs), '[33条]');
+});
+
+test('linkArticleNumberCitations: 当たる条が無い [17条] は、参考情報の [17] があってもそのまま残す', () => {
+  assert.equal(linkArticleNumberCitations('[17条]', refsWith(fillers(20))), '[17条]');
+  assert.equal(linkArticleNumberCitations('[47条]', refsWith(fillers(20))), '[47条]');
+});
+
+test('linkArticleNumberCitations: 既存の [n]・[1, 2] と mermaid の中は変えない', () => {
+  const refs = refsWith(['Main_Article_33']);
+  assert.equal(linkArticleNumberCitations('本文 [1] と [1, 2]。', refs), '本文 [1] と [1, 2]。');
+  const mermaid = '```mermaid\ngraph TD\nA[33条] --> B\n```';
+  assert.equal(linkArticleNumberCitations(mermaid, refs), mermaid);
 });
 
 // ── buildReferences ────────────────────────────────────

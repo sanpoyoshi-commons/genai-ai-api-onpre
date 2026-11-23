@@ -220,7 +220,15 @@ test('findLawTitlesInQuery: 題名の直前が漢字・カタカナなら当て�
   const index = [entry('m1', '民法')];
   assert.deepEqual(titlesIn(index, '移民法について教えて'), []);
   assert.deepEqual(titlesIn(index, '宇宙移民法の要件は'), []);
-  assert.deepEqual(titlesIn(index, '改正民法の施行日は'), []);
+});
+
+test('findLawTitlesInQuery: 題名の直前が「改正」なら当てる（その前の字は問わない）', () => {
+  const index = [entry('m1', '民法')];
+  assert.deepEqual(titlesIn(index, '改正民法の施行日は'), ['民法']);
+  assert.deepEqual(titlesIn(index, '一部改正民法の施行日は'), ['民法']);
+  // 「改正」でない漢字が直前なら、これまでどおり当てない。
+  assert.deepEqual(titlesIn(index, '移民法の要件は'), []);
+  assert.deepEqual(titlesIn(index, '宇宙移民法の要件は'), []);
 });
 
 test('findLawTitlesInQuery: ひらがなを含む題名を、語の切れ目に関係なくそのまま見つける', () => {

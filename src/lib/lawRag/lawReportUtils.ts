@@ -1,4 +1,5 @@
 import {
+  articleHeading,
   egovUrl,
   enforceDateFromLawId,
   type ArticleWithSummary,
@@ -26,6 +27,8 @@ export type Reference = FullArticle;
 export type IndexedReference = [number, Reference];
 
 const CITATION_GROUP_PATTERN = /\[(\d+(?:,\s*\d+)*)\]/g;
+/** 条の番号で書かれた引用（[33条]・[第33条]・[12条の2]・全角数字も）。漢数字の形は対象にしない。 */
+const ARTICLE_NUMBER_CITATION_PATTERN = /\[(第)?([0-9０-９]+)条(?:の([0-9０-９]+))?\]/g;
 const MERMAID_BLOCK_PATTERN = /```mermaid\n([\s\S]*?)\n```/g;
 
 // ---- 参照フォーマット ------------------------------------------------------------------
@@ -77,17 +80,25 @@ export function versionMetaSuffix(r: Reference): string {
   return parts.length ? `（${parts.join('・')}）` : '';
 }
 
-/** 出典節用の 1 参照フォーマット（番号は i+1・移植元 _format_reference の条文分岐＋as-of 版メタ）。 */
+/**
+ * 出典節用の 1 参照フォーマット（番号は i+1・移植元 _format_reference の条文分岐＋as-of 版メタ）。
+ * 見出しは条の名を含む displayTitle（無ければ title）。
+ */
 export function formatReference(i: number, r: Reference): string {
   const content = r.content ? normalizeContent(r.content) : '';
   const contentLine = content ? `\n　　> ${content}...` : '';
   const meta = versionMetaSuffix(r);
+  const title = r.displayTitle ?? r.title;
   return r.url
-    ? `[${i + 1}] 🔗 **[${r.title}](${r.url})**${meta}${contentLine}`
-    : `[${i + 1}] **${r.title}**${meta}${contentLine}`;
+    ? `[${i + 1}] 🔗 **[${title}](${r.url})**${meta}${contentLine}`
+    : `[${i + 1}] **${title}**${meta}${contentLine}`;
 }
 
-/** プロンプト向け 1 参照フォーマット（URL なし・全文・移植元 _format_reference_for_prompt の条文分岐＋as-of 版メタ）。 */
+/**
+ * プロンプト向け 1 参照フォーマット（URL なし・全文・移植元 _format_reference_for_prompt の条文分岐＋as-of 版メタ）。
+ * 見出しは title のまま（displayTitle は使わない）。条の名を見出しに入れると、LLM が参考情報の番号の
+ * 代わりに条の番号で引用したり、番号を取り違えたりすることが増えたため。
+ */
 export function formatReferenceForPrompt(i: number, r: Reference): string {
   const meta = versionMetaSuffix(r);
   return `[${i + 1}] 【e-laws公式条文】 ${r.title}${meta ? ` ${meta}` : ''}\n${r.content ?? ''}`;
@@ -105,6 +116,7 @@ export function toFullArticles(articles: ArticleWithSummary[]): FullArticle[] {
         lawNum: a.lawNum, // as-of 版解決のキー。
         lawTitle: a.lawTitle, // 版解決時に条見出しを組み直すため素の法令名を保持する。
         title: a.lawTitle,
+        displayTitle: articleHeading(a.lawTitle, a.uniqueAnchor, a.content, a.articleSummary),
         content: a.content,
         uniqueAnchor: a.uniqueAnchor,
         anchor: null,
@@ -159,6 +171,48 @@ function buildRefMap(references: IndexedReference[] | Reference[]): Map<number, 
     }
   });
   return map;
+}
+
+/** 全角の算用数字を半角に直して数にする。 */
+function toHalfWidthNumber(digits: string): number {
+  return Number(digits.replace(/[０-９]/g, (d) => String(d.charCodeAt(0) - 0xff10)));
+}
+
+/**
+ * 条の番号で書かれた引用（[33条] など）を、その条の参考情報の番号 [n] に直す。出典の選び出しとリンク化は
+ * [n] だけを拾うので、その前に呼ぶ。
+ *
+ * - unique_anchor が `_Article_N`（枝番は `_Article_N_M`）で終わる参考情報がちょうど 1 つのときだけ直す。
+ *   0 件（取り出していない条）と 2 件以上（本則と附則、2 つの法令）はそのまま残す。
+ * - 枝番の無い [N条] は、N が参考情報の数以下なら参考情報の番号 [N] に「条」を付けたものとも読めるため、
+ *   直さずに残す。枝番の形（[N条のM]）は参考情報の番号とは読めないので、数と比べない。
+ * - mermaid ブロックの中は変えない（リンク化と同じ扱い）。
+ */
+export function linkArticleNumberCitations(text: string, references: Reference[]): string {
+  const mermaidRanges: Array<[number, number]> = [];
+  for (const m of (text ?? '').matchAll(MERMAID_BLOCK_PATTERN)) {
+    mermaidRanges.push([m.index!, m.index! + m[0].length]);
+  }
+  return (text ?? '').replace(
+    ARTICLE_NUMBER_CITATION_PATTERN,
+    (match, _dai: string | undefined, num: string, branch: string | undefined, offset: number) => {
+      if (mermaidRanges.some(([s, e]) => s <= offset && offset <= e)) {
+        return match;
+      }
+      const n = toHalfWidthNumber(num);
+      if (branch === undefined && n <= references.length) {
+        return match;
+      }
+      const suffix = `_Article_${n}${branch === undefined ? '' : `_${toHalfWidthNumber(branch)}`}`;
+      const hits: number[] = [];
+      references.forEach((r, i) => {
+        if (r.uniqueAnchor.endsWith(suffix)) {
+          hits.push(i + 1);
+        }
+      });
+      return hits.length === 1 ? `[${hits[0]}]` : match;
+    },
+  );
 }
 
 /** 本文中の [n] / [n, m, ...] を出典 URL リンクに変換する（mermaid ブロック内は除外・移植元 convert_citation_to_external_link）。 */
@@ -275,7 +329,7 @@ export function sanitizeMermaidContent(text: string): string {
 export interface LawRagReferenceMeta {
   /** 元の引用番号（本文の [n] と対応・非連続を保持）。 */
   n: number;
-  /** 出典表示名（法令名＋条見出し・出典節の表記と同一）。 */
+  /** 出典表示名（法令名＋条の名＋条見出し・出典節の表記と同一）。 */
   title: string;
   /** e-Gov 法令検索 URL（条文アンカー付き）。 */
   url: string;
@@ -310,7 +364,7 @@ export function resolveCitedReferences(
 export function buildReferenceMetas(references: IndexedReference[]): LawRagReferenceMeta[] {
   return references.map(([n, r]) => ({
     n,
-    title: r.title,
+    title: r.displayTitle ?? r.title,
     url: r.url,
     enforceDate: r.enforceDate === undefined ? enforceDateFromLawId(r.lawId) : r.enforceDate,
     isFuture: r.isFuture ?? false,

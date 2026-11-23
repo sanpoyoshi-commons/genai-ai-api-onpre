@@ -160,6 +160,9 @@ const titleMatcherCache = new WeakMap<LawTitleEntry[], TitleMatcher>();
 /** 題名の直前に来たら当てない字（漢字・カタカナ）。「移民法」の中の「民法」を拾わないため。 */
 const WORD_CHAR_BEFORE_TITLE = /[一-龥ァ-ヴー々]/;
 
+/** 題名の直前がこの語なら、直前の字が漢字でも当てる（「改正民法」「一部改正民法」の「民法」）。 */
+const PREFIX_BEFORE_TITLE = '改正';
+
 function getTitleMatcher(index: LawTitleEntry[]): TitleMatcher {
   const cached = titleMatcherCache.get(index);
   if (cached) {
@@ -192,7 +195,8 @@ function getTitleMatcher(index: LawTitleEntry[]): TitleMatcher {
  * 問いの本文に、法令名マスタの題名がそのまま含まれていればそれを返す（LLM の推定に頼らない法令の特定）。
  *
  * - 問いは NFKC・空白除去だけで比べる（normalizeQueryText）。
- * - 題名の直前の字が漢字・カタカナなら当てない（「移民法」「改正民法」の中の「民法」を拾わない）。
+ * - 題名の直前の字が漢字・カタカナなら当てない（「移民法」の中の「民法」を拾わない）。ただし直前の 2 字が
+ *   「改正」なら、その前の字に関わらず当てる（「改正民法」「一部改正民法」は民法の改正を指す）。
  *   最小の長さは設けない（「民法と会社法の違い」の「民法」を拾う）。
  * - 当たりが重なるときは長いほうを採る（「〇〇法」と「〇〇法施行規則」なら「〇〇法施行規則」）。
  *   同じ長さで重なるときは先に出たほうを採る。
@@ -207,7 +211,11 @@ export function findLawTitlesInQuery(index: LawTitleEntry[], query: string): Que
   const { byLength, lengths } = getTitleMatcher(index);
   const hits: QueryTitleMatch[] = [];
   for (let start = 0; start < text.length; start += 1) {
-    if (start > 0 && WORD_CHAR_BEFORE_TITLE.test(text[start - 1] ?? '')) {
+    if (
+      start > 0 &&
+      WORD_CHAR_BEFORE_TITLE.test(text[start - 1] ?? '') &&
+      text.slice(start - PREFIX_BEFORE_TITLE.length, start) !== PREFIX_BEFORE_TITLE
+    ) {
       continue;
     }
     for (const len of lengths) {

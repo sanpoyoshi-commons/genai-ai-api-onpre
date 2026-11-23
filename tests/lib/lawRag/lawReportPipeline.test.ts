@@ -11,7 +11,7 @@ import type {
   LawTitleEntry,
   ResolvedVersion,
 } from '../../../src/repositories/lawRetriever.js';
-import { versionKey } from '../../../src/repositories/lawRetriever.js';
+import { articleHeading, articleTitle, versionKey } from '../../../src/repositories/lawRetriever.js';
 import { logger } from '../../../src/lib/logger.js';
 import type { LlmClient } from '../../../src/lib/llm/llmClient.js';
 import { LawNameEstimator } from '../../../src/lib/lawRag/lawNameEstimator.js';
@@ -226,6 +226,57 @@ test('summary-only article upgraded to full content via getFullArticles', async 
   assert.ok(out.includes('全文に差し替え済み'));
 });
 
+test('summary だけの条：差し替え前は articleTitle の形、getFullArticles で差し替えた後は条の名の見出し', async () => {
+  const summaryOnly = makeArticle({
+    lawTitle: '租税特別措置法',
+    uniqueAnchor: 'Main_Article_2',
+    articleSummary: '（定義）',
+    content: '（定義）',
+    isSummaryOnly: true,
+  });
+  const ESTIMATE = '{"law_names":["租税特別措置法"]}';
+  const REPORT = '# T\n参照 [1]。';
+  const fullContent = '（定義）　第二条\n　この法律において、…';
+  const fullRow: FullArticle = {
+    lawId: 'id1',
+    lawTitle: '租税特別措置法',
+    title: articleTitle('租税特別措置法', '（定義）'),
+    displayTitle: articleHeading('租税特別措置法', 'Main_Article_2', fullContent, '（定義）'),
+    content: fullContent,
+    uniqueAnchor: 'Main_Article_2',
+    anchor: null,
+    url: 'https://laws.e-gov.go.jp/law/id1',
+  };
+  // 差し替えに失敗（getFullArticles が例外）したときは toFullArticles の見出しが残る。
+  const failing = new FakeRetriever();
+  failing.byContent = [summaryOnly];
+  failing.getFullArticles = async () => {
+    throw new Error('db down');
+  };
+  const before = await makePipeline(failing, ESTIMATE, REPORT).generateReport('定義は', 'gemma', 'r');
+  assert.equal(before.references?.[0]?.title, '租税特別措置法 （定義）');
+  // 差し替えた後は全文から組んだ見出しになる。
+  const ok = new FakeRetriever();
+  ok.byContent = [summaryOnly];
+  ok.full = [fullRow];
+  const after = await makePipeline(ok, ESTIMATE, REPORT).generateReport('定義は', 'gemma', 'r');
+  assert.equal(after.references?.[0]?.title, '租税特別措置法 第二条（定義）');
+  assert.ok(after.report.includes('租税特別措置法 第二条（定義）'));
+});
+
+test('条の番号で書かれた引用 [33条] は [n] に直してから、出典と構造化メタを作る', async () => {
+  const retriever = new FakeRetriever();
+  retriever.byContent = [
+    makeArticle({ uniqueAnchor: 'Main_Article_2', content: '（申請）　第二条\n本文2' }),
+    makeArticle({ uniqueAnchor: 'Main_Article_33', content: '（費用）　第三十三条\n本文33' }),
+  ];
+  const pipeline = makePipeline(retriever, '{"law_names":["民法"]}', '# T\n費用は [33条] による。');
+  const res = await pipeline.generateReport('費用は', 'gemma', 'r');
+  assert.ok(res.report.includes('費用は [[2]](https://laws.e-gov.go.jp/law/id1) による。'));
+  assert.ok(!res.report.includes('[33条]'));
+  assert.deepEqual(res.references?.map((r) => r.n), [2]);
+});
+
 // ── as-of 回帰テスト ──────────────────────────────────────────────
 
 /** レポート生成の LLM 入力（user メッセージ）を捕捉する fake（参照時点通知の前置き確認用）。 */
@@ -403,26 +454,35 @@ test('as_of 解決時は条見出しも解決版へ組み直す（見出しと�
       lawNum: 'kaisha',
       lawTitle: '会社法',
       uniqueAnchor: 'Main_Article_331_2',
-      articleSummary: '成年被後見人が取締役に就任するには、その成年後見人が…',
-      content: '現行本文',
+      articleSummary: '（成年被後見人の取締役の資格）',
+      content: '（成年被後見人の取締役の資格）　第三百三十一条の二\n成年被後見人が取締役に就任するには、その成年後見人が…',
     }),
   ];
   retriever.versions.set(versionKey('kaisha', 'Main_Article_331_2'), {
     lawId: 'ID_20281223_x',
-    content: '第三百三十一条の二 特定補助人を付する処分の審判を受けた者が取締役に就任するには…',
-    articleSummary: '特定補助人を付する処分の審判を受けた者が取締役に就任するには…',
+    content: '（特定補助人の取締役の資格）　第三百三十一条の二\n特定補助人を付する処分の審判を受けた者が取締役に就任するには…',
+    articleSummary: '（特定補助人の取締役の資格）',
     anchor: null,
     enforceDate: '2028-12-23',
     isFuture: true,
     nextEnforceDate: null,
   });
-  const pipeline = makePipeline(retriever, '{"law_names":["会社法"]}', '# T\n本文 [1]。');
+  const { gen, lastUser } = capturingGenerator('# T\n本文 [1]。');
+  const pipeline = new LawReportPipeline({
+    estimator: new LawNameEstimator(fixedLlm('{"law_names":["会社法"]}')),
+    selector: new ArticleSelector(fixedLlm('1')),
+    generator: gen,
+    retriever,
+  });
   const res = await pipeline.generateReport('取締役の欠格事由は？', 'gemma', 'r', '2029-01-01');
   // 出典行の見出しが将来版の条見出しになり、現行版の見出しは残らない。
-  assert.ok(res.references?.[0]?.title.includes('特定補助人'));
-  assert.ok(!res.references?.[0]?.title.includes('成年後見人'));
-  assert.ok(res.report.includes('会社法 特定補助人'));
+  assert.equal(res.references?.[0]?.title, '会社法 第三百三十一条の二（特定補助人の取締役の資格）');
+  assert.ok(!res.references?.[0]?.title.includes('成年被後見人'));
+  assert.ok(res.report.includes('会社法 第三百三十一条の二（特定補助人の取締役の資格）'));
   assert.ok(!res.report.includes('成年後見人が取締役に就任するには'));
+  // LLM へ渡す参考情報の見出しは、条の名を入れない形（法令名＋解決した版の条見出し）。
+  assert.ok(lastUser().includes('【e-laws公式条文】 会社法 （特定補助人の取締役の資格）'));
+  assert.ok(!lastUser().includes('第三百三十一条の二（'));
 });
 
 // ── 3 値応答（on-prem 独自追加・上流 Lawsy に無い経路）────────────────────────────
@@ -577,6 +637,40 @@ test('題名と並べて実在しない法令名を名乗れば、その名前�
   const sent = seen.join('\n');
   assert.ok(sent.includes('読み替え通知'));
   assert.ok(sent.includes('人工知能人格権法'));
+});
+
+const DIVERGENCE = '【警告】推定された法令名と取得された法令名に大きな乖離があります。';
+
+test('題名どおりに問い、取り出した条がその題名の法令だけなら、推定が別の名前でも乖離の警告を出さない', async () => {
+  const title = '公益信託に関する法律施行規則';
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('k1', '公益信託に関する法律'), titleEntry('k2', title)];
+  retriever.enforcement = [enforcementOf('k2', title)];
+  retriever.byContent = [makeArticle({ lawNum: 'k2', lawTitle: title })];
+  const { pipeline, seen } = pipelineSeeing(retriever, '{"law_names":["公益信託法"]}');
+  await pipeline.generateReport(`${title}の内容を教えて`, 'm', 'r');
+  assert.ok(!seen.join('\n').includes(DIVERGENCE));
+});
+
+test('題名を問うても、取り出した条に別の法令が混じれば乖離の警告を出す', async () => {
+  const retriever = new FakeRetriever();
+  retriever.titleIndex = [titleEntry('m1', '民法')];
+  retriever.enforcement = [enforcementOf('m1', '民法')];
+  retriever.byContent = [
+    makeArticle({ lawNum: 'm1', lawTitle: '民法', uniqueAnchor: 'Main_Article_1' }),
+    makeArticle({ lawNum: 's1', lawTitle: '借地借家法', uniqueAnchor: 'Main_Article_2' }),
+  ];
+  const { pipeline, seen } = pipelineSeeing(retriever, '{"law_names":["公益信託法"]}');
+  await pipeline.generateReport('民法の内容を教えて', 'm', 'r');
+  assert.ok(seen.join('\n').includes(DIVERGENCE));
+});
+
+test('問いの中に題名が見つからなければ、乖離の警告はこれまでどおり出す', async () => {
+  const retriever = new FakeRetriever(); // titleIndex 既定 []＝題名は見つからない
+  retriever.byContent = [makeArticle({ lawTitle: '民法' })];
+  const { pipeline, seen } = pipelineSeeing(retriever, '{"law_names":["公益信託法"]}');
+  await pipeline.generateReport('消滅時効は', 'm', 'r');
+  assert.ok(seen.join('\n').includes(DIVERGENCE));
 });
 
 test('【該当なし】の文は、同梱データに無いことを告げ、e-Gov 法令検索での確かめを案内して終わる', () => {
