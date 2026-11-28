@@ -2,7 +2,7 @@
  * オブジェクトストレージの seam（seam 注入＋実 SeaweedFS 配線は後続）。
  *
  * 上流は AWS S3（PutObject/GetObject presigned URL、DeleteObject）でファイルを扱う。ローカルは
- * SeaweedFS 4.22（S3 互換）に `@aws-sdk/client-s3` ＋ `@aws-sdk/s3-request-presigner`
+ * SeaweedFS（S3 互換）に `@aws-sdk/client-s3` ＋ `@aws-sdk/s3-request-presigner`
  * で対応する。presign 自体はローカル計算だが依存追加と接続 env が要るため、ここでは
  * インターフェースのみ定義して deps 注入し、実 S3 アダプタは後続で配線する（idp/apiKey と同方式）。
  * unit テストは fake を注入する。バケット名は呼び出し側（config）が解決して bucket 引数で渡す。

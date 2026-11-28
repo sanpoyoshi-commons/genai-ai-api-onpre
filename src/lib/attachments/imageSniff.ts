@@ -2,7 +2,7 @@
  * 画像の**中身**の判定と寸法の読み取り（依存なし）。
  *
  * モデルへ渡してよいのは PNG と JPEG だけ（2026-09-27 の決定）。理由は2つ。
- *  1. Ollama v0.31.2 が同梱する `golang.org/x/image` v0.22.0 に webp の既知の脆弱性が2件ある
+ *  1. 2026-09-27 時点の Ollama v0.31.2 が同梱する `golang.org/x/image` v0.22.0 に webp の既知の脆弱性が2件ある
  *     （GO-2026-5061・CVE-2026-46603＝panic とメモリ枯渇の DoS。上げ先なし）。
  *  2. Ollama は `Serve()` で webp のデコーダを `image.RegisterFormat` で登録する。登録は
  *     **中身の先頭で形式を選ぶ**ので、`image/png` と名乗った webp でもデコーダに届く。
